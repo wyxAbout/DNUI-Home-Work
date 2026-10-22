@@ -5,7 +5,7 @@ export default defineConfig({
   manifest: {
     name: '作业整合看板',
     description: '汇总教学平台中的未提交作业',
-    permissions: ['storage', 'notifications', 'tabs'],
+    permissions: ['storage', 'notifications', 'tabs', 'scripting'],
     host_permissions: [
       'https://study.neusoft.edu.cn/*',
       'https://www.pigai.org/*',

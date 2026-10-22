@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import './App.css';
 import {
+  countCoveredCourses,
   getAllAssignments,
   PLATFORM_IDS,
   PLATFORM_LABELS,
@@ -9,6 +10,8 @@ import {
   type PlatformId,
 } from '@/src/models';
 import { loadHomeworkStore } from '@/src/storage';
+import { collectPageDiagnostic, type DiagnosticReport } from '@/src/diagnose';
+import { loadLog, clearLog, appendLog, type LogEntry } from '@/src/log';
 
 type Filter = 'all' | PlatformId;
 
@@ -48,6 +51,18 @@ function formatUpdatedAt(value: string | null): string {
   }).format(date)}`;
 }
 
+function formatLogTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(date);
+}
+
 function statusLabel(status: HomeworkStore['platforms'][PlatformId]['status']): string {
   const labels = {
     never: '未访问',
@@ -60,25 +75,66 @@ function statusLabel(status: HomeworkStore['platforms'][PlatformId]['status']): 
   return labels[status];
 }
 
+function compareAssignments(a: Assignment, b: Assignment): number {
+  if (!a.dueAt && !b.dueAt) {
+    return a.title.localeCompare(b.title, 'zh-CN');
+  }
+  if (!a.dueAt) {
+    return 1;
+  }
+  if (!b.dueAt) {
+    return -1;
+  }
+  return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
+}
+
 function sortAssignments(assignments: Assignment[]): Assignment[] {
-  return [...assignments].sort((a, b) => {
-    if (!a.dueAt && !b.dueAt) {
-      return a.title.localeCompare(b.title, 'zh-CN');
+  return [...assignments].sort(compareAssignments);
+}
+
+// 跨课程分组：按“平台 + 课程”聚合，保持平台顺序，组内按截止时间/标题排序。
+interface AssignmentGroup {
+  key: string;
+  label: string;
+  platformId: PlatformId;
+  assignments: Assignment[];
+}
+
+function groupAssignments(items: Assignment[]): AssignmentGroup[] {
+  const map = new Map<string, AssignmentGroup>();
+  for (const assignment of items) {
+    const key = `${assignment.platformId}:${assignment.courseId}`;
+    let group = map.get(key);
+    if (!group) {
+      group = {
+        key,
+        label: assignment.courseName || assignment.courseId || '未知课程',
+        platformId: assignment.platformId,
+        assignments: [],
+      };
+      map.set(key, group);
     }
-    if (!a.dueAt) {
-      return 1;
-    }
-    if (!b.dueAt) {
-      return -1;
-    }
-    return new Date(a.dueAt).getTime() - new Date(b.dueAt).getTime();
-  });
+    group.assignments.push(assignment);
+  }
+  const groups = [...map.values()];
+  groups.sort((x, y) => PLATFORM_IDS.indexOf(x.platformId) - PLATFORM_IDS.indexOf(y.platformId));
+  for (const group of groups) {
+    group.assignments.sort(compareAssignments);
+  }
+  return groups;
 }
 
 function App() {
   const [store, setStore] = useState<HomeworkStore | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [report, setReport] = useState<DiagnosticReport | null>(null);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
+  const [isDiagnosing, setIsDiagnosing] = useState(false);
+  // 诊断区默认收起，避免长期占用看板空间；点击“诊断当前页面”会自动展开。
+  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
+  const [log, setLog] = useState<LogEntry[]>([]);
 
   const refreshStore = async () => {
     setIsRefreshing(true);
@@ -86,11 +142,17 @@ function App() {
     setIsRefreshing(false);
   };
 
+  const refreshLog = async () => {
+    setLog(await loadLog());
+  };
+
   useEffect(() => {
     void refreshStore();
+    void refreshLog();
 
-    const listener = () => {
-      void refreshStore();
+    const listener = (changes: Record<string, unknown>) => {
+      if (changes['homework-store']) void refreshStore();
+      if (changes['homework-activity-log']) void refreshLog();
     };
 
     browser.storage.onChanged.addListener(listener);
@@ -110,13 +172,101 @@ function App() {
     return sortAssignments(filtered);
   }, [filter, store]);
 
+  const groups = useMemo(() => groupAssignments(assignments), [assignments]);
+
   const activeCount = store ? getAllAssignments(store).length : 0;
+  const courseCount = store ? countCoveredCourses(store) : 0;
+
+  // 等待后台把新数据写回（解析含 SPA 渲染等待，不能发完消息就立刻读缓存）。
+  const waitForStoreUpdate = async (before: string | null, timeoutMs: number) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const next = await loadHomeworkStore();
+      if (next.updatedAt !== before) {
+        return next;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    return loadHomeworkStore();
+  };
 
   const requestCurrentPageSync = async () => {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      await browser.tabs.sendMessage(tab.id, { type: 'SYNC_ACTIVE_PAGE' }).catch(() => undefined);
-      await refreshStore();
+    if (!tab?.id) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    const before = (await loadHomeworkStore()).updatedAt;
+    try {
+      let delivered = true;
+      try {
+        await browser.tabs.sendMessage(tab.id, { type: 'SYNC_ACTIVE_PAGE' });
+      } catch {
+        delivered = false;
+      }
+
+      // 扩展重载/更新后，旧标签页里的 content script 会失联（消息无人接收）。
+      // 此时直接补注入一次构建产物，避免“代码已更新但看板一直不动”。
+      if (!delivered) {
+        await browser.scripting
+          .executeScript({ target: { tabId: tab.id }, files: ['/content-scripts/content.js'] })
+          .catch(() => undefined);
+        void appendLog('info', 'sync', '当前页未注入脚本，已补注入 content script 并重新同步');
+      }
+
+      setStore(await waitForStoreUpdate(before, delivered ? 4000 : 6000));
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
+  const runDiagnostic = async () => {
+    setDiagnosticError(null);
+    setIsDiagnosticOpen(true);
+    setIsDiagnosing(true);
+    void appendLog('info', 'diagnostic', '开始诊断当前页面');
+    try {
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) {
+        setDiagnosticError('未找到当前标签页。');
+        setReport(null);
+        void appendLog('warn', 'diagnostic', '诊断：未找到当前标签页');
+        return;
+      }
+      // 直接把自包含扫描函数注入当前标签页执行，不依赖页面是否已注入过 content script。
+      const results = await browser.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: collectPageDiagnostic,
+      });
+      const report = results?.[0]?.result as DiagnosticReport | undefined;
+      if (!report) {
+        setDiagnosticError('未能读取页面结构：请确认当前标签页是东软/批改网/iTEST 的作业页面。');
+        setReport(null);
+        void appendLog('warn', 'diagnostic', '诊断：页面未返回结构，可能不是平台页面');
+        return;
+      }
+      setReport(report);
+      setDiagnostic(JSON.stringify(report, null, 2));
+      void appendLog(
+        'info',
+        'diagnostic',
+        `诊断完成：捕获 ${report.classNames.length} 个类名、${report.anchors.length} 个链接${report.truncated ? '（已截断）' : ''}`,
+      );
+    } catch {
+      setDiagnosticError(
+        '诊断失败：请确认当前标签页属于三个教学平台之一，并已在扩展管理页重新加载本扩展以授予“scripting”权限。',
+      );
+      setReport(null);
+      void appendLog('error', 'diagnostic', '诊断失败：注入执行异常');
+    } finally {
+      setIsDiagnosing(false);
+    }
+  };
+
+  const copyDiagnostic = async () => {
+    if (diagnostic) {
+      await navigator.clipboard?.writeText(diagnostic).catch(() => undefined);
     }
   };
 
@@ -150,6 +300,7 @@ function App() {
           <span className="summary-suffix">项</span>
         </div>
         <div className="summary-meta">
+          <span>覆盖 {courseCount} 门课程</span>
           <span>按访问平台更新</span>
           <span>缓存保存在本机</span>
         </div>
@@ -190,23 +341,170 @@ function App() {
         })}
       </section>
 
-      <section className="assignment-list" aria-live="polite">
-        {assignments.length > 0 ? (
-          assignments.map((assignment) => (
-            <a
-              className="assignment-row"
-              href={assignment.url}
-              target="_blank"
-              rel="noreferrer"
-              key={assignment.id}
+      <section className="diagnostic" aria-label="页面诊断">
+        <div className="diagnostic-head">
+          <button
+            className="diagnostic-toggle"
+            type="button"
+            onClick={() => setIsDiagnosticOpen((open) => !open)}
+            aria-expanded={isDiagnosticOpen}
+            aria-controls="diagnostic-panel"
+            title={isDiagnosticOpen ? '收起诊断' : '展开诊断'}
+          >
+            <span
+              className={isDiagnosticOpen ? 'diagnostic-caret open' : 'diagnostic-caret'}
+              aria-hidden="true"
             >
-              <span className="assignment-mark" />
-              <span className="assignment-content">
-                <strong>{assignment.title}</strong>
-                <span>{PLATFORM_LABELS[assignment.platformId]} · 未提交</span>
+              ▶
+            </span>
+            <span className="diagnostic-title">页面诊断（只读去敏）</span>
+            {report && (
+              <span className="diagnostic-badge">{report.assignments.length} 项</span>
+            )}
+          </button>
+          <button
+            className="text-button diagnostic-action"
+            type="button"
+            onClick={() => void runDiagnostic()}
+            disabled={isDiagnosing}
+          >
+            {isDiagnosing ? '诊断中…' : '诊断当前页面'}
+          </button>
+        </div>
+
+        {isDiagnosticOpen && (
+          <div className="diagnostic-panel" id="diagnostic-panel">
+        {diagnosticError && <p className="diagnostic-error">{diagnosticError}</p>}
+        {report && (
+          <div className="diagnostic-findings">
+            <div className="finding-row">
+              <span className="finding-key">作业标签点击</span>
+              <span className="finding-val">
+                {report.clickedAssignmentTab ? '已自动点击“作业”标签并等待渲染' : '未找到明确的“作业”标签，已静默等待渲染'}
               </span>
-              <span className="assignment-due">{formatDate(assignment.dueAt)}</span>
-            </a>
+            </div>
+
+            <div className="finding-block">
+              <span className="finding-key">内容区标签（激活项已标 ★）</span>
+              {report.tabs.length === 0 ? (
+                <p className="finding-empty">未检测到 .el-tabs__item / [role=tab] 标签</p>
+              ) : (
+                <ul className="finding-list">
+                  {report.tabs.map((t, i) => (
+                    <li key={i}>
+                      {t.active ? '★ ' : '　'}{t.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            {report.menuItems.length > 0 && (
+              <div className="finding-block">
+                <span className="finding-key">顶部菜单项</span>
+                <p className="finding-inline">{report.menuItems.join(' / ')}</p>
+              </div>
+            )}
+
+            <div className="finding-block">
+              <span className="finding-key">作业区可见文本（去敏）</span>
+              {report.mainText ? (
+                <textarea className="diagnostic-maintext" readOnly value={report.mainText} />
+              ) : (
+                <p className="finding-empty">作业区文本为空，可能列表仍未渲染或位于其他页面</p>
+              )}
+            </div>
+
+            <div className="finding-block">
+              <span className="finding-key">疑似接口路径（仅 pathname）</span>
+              {report.requests.length === 0 ? (
+                <p className="finding-empty">本次未捕获到作业相关接口请求</p>
+              ) : (
+                <ul className="finding-list">
+                  {report.requests.map((r, i) => (
+                    <li key={i}>
+                      <code>{r.method}</code> {r.path}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="finding-block">
+              <span className="finding-key">作业项解析（状态 / 剩余次数 / 动作）</span>
+              {report.assignments.length === 0 ? (
+                <p className="finding-empty">未解析到作业项，可能作业列表仍未渲染或标记文案不同</p>
+              ) : (
+                <>
+                  <p className="finding-inline">
+                    {report.assignmentSummary
+                      ? `已完成 ${report.assignmentSummary.done}/${report.assignmentSummary.total} · `
+                      : ''}
+                    待提交 {report.assignments.filter((a) => !a.submitted).length} 项
+                    {report.assignments.some((a) => a.courseName) ? '（首页“我的学习任务”）' : ''}
+                  </p>
+                  <ul className="finding-list assignment-findings">
+                    {report.assignments.map((a, i) => (
+                      <li key={i} className={a.submitted ? 'af-done' : 'af-pending'}>
+                        <span className={`af-status ${a.submitted ? 'af-submitted' : 'af-unsubmitted'}`}>
+                          {a.status}
+                        </span>
+                        <span className="af-index">{a.index}</span>
+                        <span className="af-title">{a.title}</span>
+                        {a.courseName && <span className="af-course">{a.courseName}</span>}
+                        <span className="af-meta">剩余{a.remainingAttempts}次 · {a.action}</span>
+                        {a.dueAt && <span className="af-progress">截止 {formatDate(a.dueAt)}</span>}
+                        {a.progress && <span className="af-progress">{a.progress}</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+        {diagnostic && (
+          <div className="diagnostic-body">
+            <button className="text-button" type="button" onClick={() => void copyDiagnostic()}>
+              复制完整摘要
+            </button>
+            <textarea className="diagnostic-output" readOnly value={diagnostic} />
+          </div>
+        )}
+        <p className="diagnostic-note">
+          诊断仅读取当前标签页的 DOM 结构，已去除表单值、Cookie、token 等敏感信息，不会上传任何数据。用于定位作业页面结构。
+        </p>
+          </div>
+        )}
+      </section>
+
+      <section className="assignment-list" aria-live="polite">
+        {groups.length > 0 ? (
+          groups.map((group) => (
+            <div className="assignment-group" key={group.key}>
+              <div className="assignment-group-head">
+                <span className="group-label">{group.label}</span>
+                <span className="group-meta">
+                  {PLATFORM_LABELS[group.platformId]} · {group.assignments.length} 项
+                </span>
+              </div>
+              {group.assignments.map((assignment) => (
+                <a
+                  className="assignment-row"
+                  href={assignment.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  key={assignment.id}
+                >
+                  <span className="assignment-mark" />
+                  <span className="assignment-content">
+                    <strong>{assignment.title}</strong>
+                    <span>{PLATFORM_LABELS[assignment.platformId]} · 未提交</span>
+                  </span>
+                  <span className="assignment-due">{formatDate(assignment.dueAt)}</span>
+                </a>
+              ))}
+            </div>
           ))
         ) : (
           <div className="empty-state">
@@ -221,6 +519,28 @@ function App() {
         <span>{formatUpdatedAt(store.updatedAt)}</span>
         <span>平台访问后自动更新</span>
       </footer>
+
+      <section className="log-panel" aria-label="运行日志">
+        <div className="log-head">
+          <span>运行日志</span>
+          <button className="text-button" type="button" onClick={() => void clearLog()}>
+            清空
+          </button>
+        </div>
+        {log.length === 0 ? (
+          <p className="log-empty">暂无日志</p>
+        ) : (
+          <ul className="log-list">
+            {[...log].reverse().slice(0, 30).map((entry, idx) => (
+              <li className={`log-item log-${entry.level}`} key={`${entry.ts}-${idx}`}>
+                <span className="log-time">{formatLogTime(entry.ts)}</span>
+                <span className="log-badge">{entry.source}</span>
+                <span className="log-msg">{entry.message}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </main>
   );
 }

@@ -12,3 +12,6 @@ extension/.output/
 .idea/
 .vscode/
 *.log
+
+# Agent working memory (WorkBuddy local memory, not project source)
+.workbuddy/

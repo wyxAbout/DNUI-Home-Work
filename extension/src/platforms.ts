@@ -1,22 +1,21 @@
 import {
   PLATFORM_HOSTS,
   PLATFORM_LABELS,
-  type Assignment,
+  type PlatformExtractionResult,
   type PlatformId,
-  type PlatformSyncStatus,
 } from './models';
-
-export interface PlatformExtractionResult {
-  status: PlatformSyncStatus;
-  assignments: Assignment[];
-  message: string;
-}
+import { extractNeusoftAssignments } from './neusoft';
 
 export interface PlatformAdapter {
   id: PlatformId;
   label: string;
   matchesUrl(url: string): boolean;
-  extract(document: Document, url: string): PlatformExtractionResult;
+  // 返回 null 表示“当前页面与作业无关”，调用方应静默跳过（不更新缓存）。
+  extract(
+    document: Document,
+    url: string,
+    options: { allowAutoOpen: boolean },
+  ): Promise<PlatformExtractionResult | null> | PlatformExtractionResult | null;
 }
 
 function hostMatches(url: string, hosts: string[]): boolean {
@@ -41,7 +40,7 @@ const adapters: PlatformAdapter[] = [
     id: 'neusoft',
     label: PLATFORM_LABELS.neusoft,
     matchesUrl: (url) => hostMatches(url, PLATFORM_HOSTS.neusoft),
-    extract: () => notReadyResult('东软页面解析器待验证，暂未更新已有作业数据。'),
+    extract: (document, url, options) => extractNeusoftAssignments(document, url, options),
   },
   {
     id: 'pigai',
