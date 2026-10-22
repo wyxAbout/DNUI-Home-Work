@@ -3,7 +3,7 @@
 }
 
 .app-shell {
-  width: 680px;
+  width: 100%;
   min-height: 560px;
   padding: 28px;
   color: #182326;
@@ -310,19 +310,70 @@ h1 {
   line-height: 1.6;
 }
 
+/* 空态下的平台自检：让“没有作业”与“同步未成功”一眼可区分 */
+.empty-platforms {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  max-width: 420px;
+  margin: 18px 0 0;
+  padding: 12px 14px;
+  border: 1px solid #e1e6e3;
+  border-radius: 8px;
+  background: #ffffff;
+  list-style: none;
+  text-align: left;
+}
+
+.empty-platforms li {
+  display: grid;
+  grid-template-columns: 7px 76px auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11px;
+}
+
+.empty-platforms .status-dot {
+  align-self: center;
+}
+
+.empty-platform-name {
+  color: #5e696a;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.empty-platform-state {
+  color: #98a29f;
+  white-space: nowrap;
+}
+
+.empty-platform-msg {
+  color: #8a9493;
+  overflow-wrap: anywhere;
+}
+
 .footer {
   display: flex;
   justify-content: space-between;
+  gap: 12px;
   margin-top: 24px;
   color: #98a29f;
   font-size: 11px;
 }
 
+.footer-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  white-space: nowrap;
+}
+
 @media (max-width: 560px) {
+  /* 只调整内部密度，绝不把 .app-shell 改成 width:auto / min-width:320px：
+     那会让弹窗永久塌缩成窄栏，且低于 320px 时产生横向溢出。 */
   .app-shell {
-    width: auto;
-    min-width: 320px;
-    padding: 20px;
+    padding: 18px;
   }
 
   .platform-status {
@@ -336,6 +387,10 @@ h1 {
   /* 窄弹窗下优先保证标题与按钮单行可读 */
   .diagnostic-badge {
     display: none;
+  }
+
+  .log-item {
+    grid-template-columns: auto auto minmax(0, 1fr);
   }
 }
 
@@ -498,6 +553,7 @@ h1 {
 .finding-val {
   color: #324542;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .finding-block {
@@ -649,7 +705,9 @@ h1 {
 
 .log-item {
   display: grid;
-  grid-template-columns: 64px 64px minmax(0, 1fr);
+  /* 时间/来源取内容宽度，消息列吃掉剩余空间并允许任意换行，
+     避免固定列宽把长消息挤成每行几个字。 */
+  grid-template-columns: auto auto minmax(0, 1fr);
   gap: 8px;
   align-items: baseline;
   padding: 6px 8px;
@@ -662,15 +720,18 @@ h1 {
 .log-time {
   color: #8a9493;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .log-badge {
   color: #518172;
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .log-msg {
   color: #324542;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 

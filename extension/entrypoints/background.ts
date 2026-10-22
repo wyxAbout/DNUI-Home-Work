@@ -20,6 +20,8 @@ interface PlatformPageReadyMessage {
   courseIds?: string[];
   replaceAll?: boolean;
   message: string;
+  // 发送方 content script 的构建标识（用于排查“旧脚本仍在应答”类问题）。
+  buildId?: string;
 }
 
 const NOTIFICATION_ID = 'homework-summary';
@@ -90,7 +92,13 @@ export default defineBackground(() => {
         `${label} 同步成功：${message.assignments?.length ?? 0} 项未提交作业`,
       );
     } else if (message.status === 'needs-verification') {
-      void appendLog('warn', 'sync', `${label} 解析器待验证，未更新作业数据`);
+      // 带上解析器的具体原因（例如“解析 1 项，与待完成 2 不一致”），
+      // 否则日志里只有“待验证”，无法判断是结构变了还是没渲染完。
+      void appendLog(
+        'warn',
+        'sync',
+        `${label} 待验证：${message.message || '解析结果与页面汇总不一致'}`,
+      );
     } else if (message.status === 'login-required') {
       void appendLog('warn', 'sync', `${label} 需要登录，未更新作业数据`);
     } else if (message.status === 'error') {

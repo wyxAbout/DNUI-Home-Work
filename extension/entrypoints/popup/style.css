@@ -13,9 +13,14 @@
 }
 
 body {
-  min-width: 320px;
-  min-height: 100vh;
+  /* 弹窗宽度由宿主（Chrome/Edge）按内容宽度决定，上限 800px。
+     这里显式给 body 定宽：一旦改用媒体查询里的 width:auto，
+     浏览器可能先按初始窄视口排版，popup 就被永久压成一条窄栏
+     （表现为内容堆叠换行、运行日志每行只剩几个字）。 */
+  width: 680px;
+  min-height: 400px;
   margin: 0;
+  overflow-x: hidden;
 }
 
 button,

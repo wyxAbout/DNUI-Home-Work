@@ -73,6 +73,10 @@ export interface DiagnosticAssignmentSummary {
 export interface DiagnosticReport {
   url: string;
   title: string;
+  // 当前标签页所属域名（取自 window.location.hostname，完全自包含）。
+  // 用于确认诊断证据来自哪个平台，便于与 PLATFORM_HOSTS 对照（尤其是 iTEST 的
+  // sso.unipus.cn 登录域与 itestcloud.unipus.cn 作业域分属同一平台）。
+  hostname: string;
   generatedAt: string;
   truncated: boolean;
   // 本次是否主动点击了“作业”类标签（用于判断是否触发了二次渲染）。
@@ -546,6 +550,7 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   return {
     url: safePageUrl(),
     title: document.title.slice(0, 200),
+    hostname: window.location.hostname,
     generatedAt: new Date().toISOString(),
     truncated: state.truncated,
     clickedAssignmentTab,

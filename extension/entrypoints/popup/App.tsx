@@ -12,6 +12,7 @@ import {
 import { loadHomeworkStore } from '@/src/storage';
 import { collectPageDiagnostic, type DiagnosticReport } from '@/src/diagnose';
 import { loadLog, clearLog, appendLog, type LogEntry } from '@/src/log';
+import { BUILD_ID } from '@/src/build';
 
 type Filter = 'all' | PlatformId;
 
@@ -31,6 +32,18 @@ function formatDate(value: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(date);
+}
+
+// 构建标识是构建时刻的 ISO 时间戳（wxt.config.ts 注入），这里只显示“月-日 时:分”，
+// 便于用户和开发者核对“弹窗里跑的到底是不是刚打包的那一版”。
+function formatBuildId(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function formatUpdatedAt(value: string | null): string {
@@ -190,6 +203,41 @@ function App() {
     return loadHomeworkStore();
   };
 
+  // 探测页面内运行的是哪一次构建的 content script（null = 没有脚本应答）。
+  const pingContentScript = async (tabId: number): Promise<string | null> => {
+    try {
+      const pong = (await browser.tabs.sendMessage(tabId, { type: 'HW_PING' })) as
+        | { buildId?: string }
+        | undefined;
+      return pong?.buildId ?? null;
+    } catch {
+      return null;
+    }
+  };
+
+  const injectContentScript = async (tabId: number): Promise<boolean> => {
+    try {
+      await browser.scripting.executeScript({
+        target: { tabId },
+        files: ['/content-scripts/content.js'],
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // 一键重载扩展：让磁盘上最新的构建（新解析器/新弹窗资源）立刻生效。
+  // 说明：浏览器不会自动把新打包的脚本换进已加载的扩展，这是“日志里明明是新时间、
+  // 行为却还是旧逻辑”的唯一原因。重载会关闭本弹窗，重开后“构建”时间戳应更新。
+  const reloadExtension = () => {
+    void appendLog('info', 'sync', '正在重载扩展以应用最新构建…');
+    // 给日志落盘留一点时间，再重载（重载会中断当前页面上下文）。
+    window.setTimeout(() => {
+      browser.runtime.reload();
+    }, 200);
+  };
+
   const requestCurrentPageSync = async () => {
     const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
@@ -199,23 +247,46 @@ function App() {
     setIsRefreshing(true);
     const before = (await loadHomeworkStore()).updatedAt;
     try {
-      let delivered = true;
-      try {
-        await browser.tabs.sendMessage(tab.id, { type: 'SYNC_ACTIVE_PAGE' });
-      } catch {
-        delivered = false;
-      }
+      const buildId = await pingContentScript(tab.id);
 
-      // 扩展重载/更新后，旧标签页里的 content script 会失联（消息无人接收）。
-      // 此时直接补注入一次构建产物，避免“代码已更新但看板一直不动”。
-      if (!delivered) {
-        await browser.scripting
-          .executeScript({ target: { tabId: tab.id }, files: ['/content-scripts/content.js'] })
+      if (buildId === BUILD_ID) {
+        await browser.tabs
+          .sendMessage(tab.id, { type: 'SYNC_ACTIVE_PAGE' })
           .catch(() => undefined);
-        void appendLog('info', 'sync', '当前页未注入脚本，已补注入 content script 并重新同步');
+      } else {
+        // 两种需要补救的情况：
+        // ① 扩展更新后，旧标签页里的脚本失联（消息无人接收）；
+        // ② 脚本还在，但属于上一次打包的旧版本 —— 它只会返回旧逻辑的结果，
+        //    表现为“代码已更新、看板却一直显示待验证/空”。
+        // 统一处理：补注入本次构建的产物，由它的首次上报完成同步。
+        const injected = await injectContentScript(tab.id);
+        // 注射后再 ping 一次：确认最新脚本真的接管了页面。
+        // 否则会出现“日志说已注入、看板却不动”的假成功（例如页面 CSP 拒绝注入）。
+        const after = injected ? await pingContentScript(tab.id) : null;
+        if (!injected) {
+          void appendLog(
+            'error',
+            'sync',
+            '当前页无法注入脚本：请确认它是东软/批改网/iTEST 页面，并重载扩展授予 scripting 权限',
+          );
+        } else if (after === BUILD_ID) {
+          void appendLog(
+            'info',
+            'sync',
+            buildId
+              ? '页面内是旧版脚本，已注入最新版并重新解析'
+              : '当前页未运行脚本，已注入最新版并开始解析',
+          );
+        } else {
+          void appendLog(
+            'error',
+            'sync',
+            '已注入脚本但未被页面接管：请在扩展管理页重载扩展后刷新该页面',
+          );
+        }
       }
 
-      setStore(await waitForStoreUpdate(before, delivered ? 4000 : 6000));
+      setStore(await waitForStoreUpdate(before, 6000));
     } finally {
       setIsRefreshing(false);
     }
@@ -332,7 +403,11 @@ function App() {
         {PLATFORM_IDS.map((platformId) => {
           const platform = store.platforms[platformId];
           return (
-            <div className="platform-status-item" key={platformId}>
+            <div
+              className="platform-status-item"
+              key={platformId}
+              title={platform.message ?? undefined}
+            >
               <span className={`status-dot status-${platform.status}`} />
               <span>{PLATFORM_LABELS[platformId]}</span>
               <span className="status-label">{statusLabel(platform.status)}</span>
@@ -377,6 +452,10 @@ function App() {
         {diagnosticError && <p className="diagnostic-error">{diagnosticError}</p>}
         {report && (
           <div className="diagnostic-findings">
+            <div className="finding-row">
+              <span className="finding-key">当前域名</span>
+              <span className="finding-val">{report.hostname}</span>
+            </div>
             <div className="finding-row">
               <span className="finding-key">作业标签点击</span>
               <span className="finding-val">
@@ -511,13 +590,39 @@ function App() {
             <div className="empty-icon">✓</div>
             <h2>当前没有已同步的未提交作业</h2>
             <p>访问并登录东软智慧教育、批改网或 iTEST 后，插件会更新对应平台。</p>
+            {/* 空看板必须能自解释：区分“真的没有待办”和“同步没成功/待验证”。 */}
+            <ul className="empty-platforms">
+              {PLATFORM_IDS.map((platformId) => {
+                const platform = store.platforms[platformId];
+                return (
+                  <li key={platformId}>
+                    <span className={`status-dot status-${platform.status}`} />
+                    <span className="empty-platform-name">{PLATFORM_LABELS[platformId]}</span>
+                    <span className="empty-platform-state">{statusLabel(platform.status)}</span>
+                    {platform.message && (
+                      <span className="empty-platform-msg">{platform.message}</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         )}
       </section>
 
       <footer className="footer">
         <span>{formatUpdatedAt(store.updatedAt)}</span>
-        <span>平台访问后自动更新</span>
+        <span className="footer-actions">
+          <span title={`构建标识：${BUILD_ID}`}>构建 {formatBuildId(BUILD_ID)}</span>
+          <button
+            className="text-button"
+            type="button"
+            onClick={reloadExtension}
+            title="重新加载扩展，让新构建的解析器立即生效（重载后请重新打开本弹窗）"
+          >
+            重载扩展
+          </button>
+        </span>
       </footer>
 
       <section className="log-panel" aria-label="运行日志">

@@ -5,6 +5,7 @@ import {
   type PlatformId,
 } from './models';
 import { extractNeusoftAssignments } from './neusoft';
+import { extractItestAssignments } from './itest';
 
 export interface PlatformAdapter {
   id: PlatformId;
@@ -52,7 +53,7 @@ const adapters: PlatformAdapter[] = [
     id: 'itest',
     label: PLATFORM_LABELS.itest,
     matchesUrl: (url) => hostMatches(url, PLATFORM_HOSTS.itest),
-    extract: () => notReadyResult('iTEST 页面解析器待验证，暂未更新已有作业数据。'),
+    extract: (document, url, options) => extractItestAssignments(document, url, options),
   },
 ];
 

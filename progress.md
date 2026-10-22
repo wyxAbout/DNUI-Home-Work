@@ -33,3 +33,44 @@
 - 2026-10-22（晚）：修复“我的学习任务里有内容但看板获取不到（未完成 0 项）”。两个根因：① `HOME_ANCHOR_RE` 把类型标签写死为 `作业\s*截止时间：`，而实测条目徽章是**测验** → 整条漏抓；改为只锚 `截止时间：<date>所属课程：<course> 去作答`，再用 `stripTrailingType()` 从标题末尾剥掉 1~6 字类型词（边界正则 `(?:^|\s)([^\s]{1,6})$` 保证“标题自身以测验结尾”不被误裁）。② `.my-task` 还包住“我的考试”，其 `.noData` 让 `hasHomeEmptyState` 误判为空 → 返回 `success+replaceAll` 把缓存清成 0；新增 `findHomeTaskBlock(doc)` 把解析与空态判定都限定在“我的学习任务”区块内，并加保险“区块内出现‘去作答’即判非空”。`diagnose.ts` 同步修复。单测 14 例全过，tsc/build 通过（content.js 11.09 kB）。
 - 2026-10-22（下午）：实现**首页“我的学习任务”自动同步**（用户诉求：直接打开首页/重新加载即可自动同步）。用户在首页（`东软智慧教育平台 - 首页`）回传诊断，发现 `.my-task` 区块天然跨课程且无需点击任何标签，每项形如 `<序号?><标题> 作业 截止时间：YYYY-MM-DD HH:MM:SS所属课程：<课程名> 去作答`，同时解决了“跨课程”与“截止时间缺失”两个老限制。实施：① `neusoft.ts` 新增 `parseNeusoftHomeTasks(text)` + `slugifyCourse()` + `hasHomeEmptyState()`，首页路径优先于课程详情页路径；② 解析改为**锚点定位 + 边界切割**（先用 `作业\s*截止时间：<date>\s*所属课程：<course>\s*去作答` 定位每项，标题取“上一个锚点结尾 ~ 本锚点开头”，再剔除首项前的界面文案），修掉了可选序号组被惰性标题吞掉、首项吃进“我的学习任务/请选择所属课程”的缺陷；③ 时序加固：`readText()` 在容器文本 <40 字时回退整页，并新增 `pageReady()` 有界等待（首页区块标题或课程作业标记任一出现）——解决 document_idle 时 Vue 尚未渲染导致漏同步；④ 空态保护：区块在但无待办且命中 `.el-empty/.neu-empty/.no-data-content` 等空态标记时才返回 `success + replaceAll:true` 清空该平台，否则静默跳过不覆盖缓存；⑤ `models.ts`：`Assignment` 新增 `source: 'home'|'course'`，`mergeAssignmentsByCourse` 在本次含首页来源时把“旧的首页来源课程”也纳入清理范围（避免某门课作业全做完从首页消失后旧条目永久残留），并新增 `unifyCourseAttribution`（同标题沿用信息更完整来源的课程归属，避免首页/课程页两条路径把同一门课裂成两个分组）与 `dedupeAssignments`（同平台+课程+标题去重，有截止时间优先）；`PlatformExtractionResult` 新增 `courseIds[]` 与 `replaceAll`；⑥ `background.ts` 按 `courseIds` 定合并范围、支持 `replaceAll` 整组替换；`storage.ts` 回填 `source` 并兼容 `neusoft:home:<slug>:...` 的 id 形式；⑦ `diagnose.ts` 同步支持首页结构解析（自包含副本）并把 `.my-task` 加入可见文本 fallback 链，`DiagnosticAssignment` 新增 `courseName`/`dueAt`；popup 诊断项展示课程名与截止日期。新增 6 项单测（首页解析 3 例 + 合并/去重/清理 3 例），`npm test` 12/12 通过；`tsc --noEmit` 与 `wxt build` 均通过（content.js 7.50→10.49 kB）。待用户重载扩展后打开东软首页（刷新一次）验证看板按课程分组列出全部待提交作业及截止时间。
 - 2026-10-22（下午）：实现**跨课程汇总**（用户择定方向 A）。根因修复：此前后台在 success 时整体替换 `platforms[neusoft].assignments`，导致访问多门课程后仅保留最近同步的一门。方案：① `models.ts` 的 `Assignment` 新增 `courseId`/`courseName` 维度；新增纯函数 `mergeAssignmentsByCourse(existing, incoming, scopeCourseId)`（按课程替换、保留其它课程与平台）与 `countCoveredCourses(store)`；② `neusoft.ts` 新增 `extractCourseName(doc, fallback)`（best-effort：内容区主标题→页面标题剥离站点后缀→回退 courseId），每条作业带上课程信息，结果含 `courseId`/`courseName`；③ `content.ts` 转发 `courseId`/`courseName`；④ `background.ts` 成功同步改为先读缓存、按课程合并再写回（而非覆盖），`onMessage` 回调改为 async；⑤ `storage.ts` 加载时对旧缓存按 id 前缀回填 `courseId`/`courseName`，避免 undefined；⑥ popup `App.tsx` 作业列表改为按“平台+课程”分组展示（组头显示课程名+平台+数量），摘要条新增“覆盖 N 门课程”。新增 `src/models.test.ts`（3 例跨课程合并/统计测试），`npm test` 改为 `src/*.test.ts`。`tsc --noEmit`、`wxt build`、6 项单测均通过。原先限制①已解除：现在每门课独立累积。待用户重载扩展后分别打开两门以上东软课程刷新，应在看板看到多课程分组汇总。
+
+## 2026-10-22（晚）
+
+- 启动 **iTEST 适配器**工作（东软已完成真实解析，iTEST 此前为内联占位）。按东软已验证的“先取证、再落地”路线推进，严守“不猜测 API/字段/未提交状态文案”硬约束。
+- 新增 `extension/src/itest.ts`：导出 `extractItestAssignments(doc, url, {allowAutoOpen})`，当前为**占位实现**——返回 `needs-verification`、不更新缓存（与东软占位行为一致，后台不会覆盖上次成功同步）。文件头部注明 iTEST 入口（sso.unipus.cn 登录域 + itestcloud.unipus.cn 作业域同属一平台）、待验证项与实现约束。
+- `platforms.ts`：iTEST 适配器从内联 `notReadyResult` 改为调用 `extractItestAssignments`；`content.ts` 的 matches 已含 `sso.unipus.cn`/`itestcloud.unipus.cn`/`*.unipus.cn`，popup 的诊断按钮文案也已提示 iTEST，故**壳层已就绪，仅缺真实页面解析**。
+- `diagnose.ts`：诊断报告新增 `hostname` 字段（取自 `window.location.hostname`，完全自包含，无隐私风险），popup 诊断面板新增“当前域名”一行。用途：用户把 iTEST 诊断结果贴回时，可立即确认来源域名、与 `PLATFORM_HOSTS.itest` 对照，避免把登录域/作业域混淆。
+- 注意：`diagnose.ts` 的 `extractAssignments()` 仍**写死东软结构**（课后/剩余作答次数/已完成 X/Y/所属课程），在 iTEST 页会返回空 `assignments`；但通用的 `mainText`/`tree`/`requests`/`tabs`/`menuItems`/`hostname` 已能抓到 iTEST 原始结构——这正是落地解析器所需的证据。
+- 待用户执行的关键一步（对应东软小任务 1/2）：在 Edge 中**登录 iTEST 并打开“作业列表页”**（域名应为 `itestcloud.unipus.cn`，而非 `sso.unipus.cn` 登录页），点击看板“诊断当前页面”，把去敏摘要贴回。拿到真实状态词/列表结构/接口后再落地 `itest.ts` 的解析逻辑，并补 `itest.test.ts`。
+
+## 2026-10-22（22 时许）
+
+- 用户回传 iTEST 真实诊断样本（`itestcloud.unipus.cn/utest/itest/s/exam` 的 `mainText`/`tree`/`hostname`）。据此把 **iTEST 真实解析器落地到 `extension/src/itest.ts`**，彻底告别占位。
+- 真实结构确认（证据驱动，零猜测）：
+  - 顶部汇总 `全部考试 12 待完成 2 已完成 10 诊断报告 0` → 平台“待完成”桶即本扩展的“未提交”语义。
+  - 每条考试 = `<标签 日常>` + `<名称（含“（ID：数字）”）>` + `<类型 学校考试>` + `<状态按钮/标签 进入考试|缺考>` + `<状态提示 考试已开始，请进入作答 / 考试已结束，无法参加考试>` + `进入时间：起 - 止` 窗口 + `考试地点：--`。
+  - 两种现场状态均见到：① 仍可作答（状态提示含“考试已开始，请进入作答”+“进入考试”按钮）→ 归 `pending`；② 缺考/已错过（状态提示含“考试已结束，无法参加考试”或“缺考”标签）→ 归 `absent`。两者都属于平台“待完成”计数，均纳入看板；已完成（已完成/已提交/已交卷/成绩已出）排除。
+- 实现要点（对齐东软“先取证再落地 + 不猜 API”约束）：
+  - 解析**以可见文本为锚**（不以 CSS module 哈希类名为锚，避免前端发布后类名变化失效），用稳定可见的“（ID：数字）”作为每条考试边界，标题/标签取边界前紧邻两词，类型/状态/时间取边界后片段；截止时间取“进入时间”窗口结束时刻（本地时间 ISO）。
+  - 净化为纯函数 `parseItestExamPageText(text)` / `classifyItestStatus(text)` / `mapItestAssignments(items, ctx)`，DOM 胶水层只占 `extractItestAssignments(doc,url,{allowAutoOpen})` 一小段（等待 React+qiankun SPA 渲染、SSO 登录域判 `login-required`、非考试列表页静默 `null`）。
+  - **完整性校验**：解析出的“未提交”条数必须等于页面“待完成”汇总；不一致先再等一轮，仍不一致则报 `needs-verification`（后台不覆盖旧缓存）。确实为 0 项时 `replaceAll` 整组清空该平台，避免班级名提取波动残留旧条目。
+  - “进入考试”为 JS 按钮无 href，无逐项深链证据 → `url` 回退考试列表页（与东软同策略）。分组维度 `courseId/courseName` 取“我的班级”区块文本（best-effort，缺失回退 `iTEST`）。
+- 新增 `extension/src/itest.test.ts`（5 例，用真实诊断样本：定位两条考试+标题/ID/类型/截止、状态三分类、未提交集合与“待完成”一致、映射到 Assignment、无 ID 回退标题 slug），复用 neusoft 的 `slugifyCourse`。`import` 用 `'./neusoft.ts'` 显式扩展名（node ESM 运行时要求）。
+- 验证：`npm run compile` 零错误；`npm test` 19/19 通过（neusoft 14 + itest 5）；`npm run build` 成功（content.js 11.49→14.83 kB）。
+- 待用户在扩展管理页**重载扩展**后，于已登录的 iTEST 考试列表页重跑同步（看板自动上报或点“刷新当前平台”），确认看板出现“iTEST · 班级名”分组及待完成项（含仍可作答/已错过截止的区分提示）。若状态词与样本不同（如其它“待完成”措辞），按“未知即不计入、触发 needs-verification”的既有保护，再据新证据补正则。
+
+- 2026-10-22（晚）：用户反馈“显示有问题”并附截图。定位到**两个独立缺陷**：
+  1. **同步无数据（根因）**：截图中 22:17:11 同步结果为 `needs-verification`。新解析器本身无问题（单测即用真实样本），真因是**页面内仍在运行上一次构建的旧 content script**——扩展更新后已打开的标签页不会自动换脚本，旧脚本只会返回占位“待验证”。原补救逻辑仅在 `sendMessage` 抛错时才补注入，旧脚本能正常应答时永远不会触发。
+     - 方案：新增 `src/build.ts`（`BUILD_ID` 由 `wxt.config.ts` 的 `vite.define` 在每次构建注入，popup 与 content script 同一次构建共享同一值）；`entrypoints/content.ts` 增加 `HW_PING` 版本探测应答 + 首次注入标记（防重复注入导致重复上报）；popup 的“刷新当前平台”改为：先 ping，版本一致才发 `SYNC_ACTIVE_PAGE`，不一致/无应答则补注入最新产物由其首次上报完成同步。
+     - 顺带提升可诊断性：`background.ts` 的 `needs-verification` 日志改为带上解析器具体原因（原来只有一句“解析器待验证”）。
+  2. **弹窗被压窄（显示问题）**：`.app-shell` 的 `width:680px` 与 `@media(max-width:560px)` 里的 `width:auto;min-width:320px` 冲突 —— 宿主可能按初始窄视口排版后永久停留在窄态，表现为内容堆叠、运行日志每行只剩几个字。
+     - 方案：`style.css` 的 `body` 显式定宽 `680px`（不再依赖内容撑开）、`overflow-x:hidden`；`.app-shell` 改 `width:100%`；媒体查询只调内边距/列数，**不再改宽度**；`.log-item` 列宽改 `auto auto minmax(0,1fr)` 并允许消息任意换行；`.finding-val`/`.empty-platform-msg` 加 `overflow-wrap:anywhere`。
+     - 另补**空态自解释**：空看板下列出三个平台的同步状态与后台返回的具体 message，区分“确实没有待办”与“同步未成功/待验证”，避免空态看起来像坏了。
+- 验证：`npm run compile` 零错误；`npm test` 19/19 通过；`npm run build` 成功（content.js 15.02 kB）；已确认 `content.js` 与 `chunks/popup-*.js` 内构建标识一致、`HW_PING` 同时存在、产物 CSS 中 `body{width:680px}` 生效。
+- 仍需用户执行：扩展管理页**重载扩展** → 打开 iTEST 考试列表页 → 点看板右上角“↻”（此时应记录“已注入最新版并重新解析”）→ 确认出现 iTEST 分组 2 项待完成。
+
+- 2026-10-22 22:30（截图复现：仍是旧包）：用户第二次贴图，日志仍为“iTEST 解析器待验证，未更新作业数据”且空态没有平台自检列表 → 判定**扩展从未重载**（22:25 的日志由仍在运行的旧 Service Worker 写入旧文案；我的新文案是“iTEST 待验证：…”）。佐证：① 全盘仅一份产物 `extension/.output/chrome-mv3/manifest.json`，路径无误；② 产物内已是新代码（新文案、`width:680px`、空态自检列表、`HW_PING`）；③ 弹窗 CSS 无法把 680px 压成截图里的窄条，且 JSX 里的自检列表完全没出现 —— 只能是旧 bundle。
+  - **解析器离线复验**：用用户贴回的真实 `mainText` 直接跑 `parseItestExamPageText`，输出 `pending`（B2U6，截止 11-16 23:55）+ `absent`（B2U5，截止 10-19 23:55），`pendingCount=2 / nonDone=2 / MATCH=true` → 重载后应一次成功，不存在“换个方式失败”的风险。
+  - 降低“忘记重载”的复发：弹窗页脚新增**构建时间戳**（`formatBuildId`，显示“构建 MM-DD HH:mm”）与**“重载扩展”按钮**（`browser.runtime.reload()`，延迟 200ms 让日志落盘）；注射脚本后**再 ping 一次**校验是否真被接管，失败则明确报错而非假成功。
+  - 验证：`tsc --noEmit` 零错误、`npm test` 19/19、`npm run build` 成功，`content.js` 与 `chunks/popup-*.js` 构建标识一致 = `2026-10-22T14:30:34.554Z`。
+  - 本轮判定标准（给用户）：重载后页脚应显示“构建 10-22 22:30”，日志应变成“iTEST 同步成功：2 项未提交作业”。
