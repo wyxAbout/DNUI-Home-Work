@@ -1,0 +1,14 @@
+# Dependencies
+extension/node_modules/
+
+# WXT generated files and production output
+extension/.wxt/
+extension/.output/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.log
