@@ -74,3 +74,9 @@
   - 降低“忘记重载”的复发：弹窗页脚新增**构建时间戳**（`formatBuildId`，显示“构建 MM-DD HH:mm”）与**“重载扩展”按钮**（`browser.runtime.reload()`，延迟 200ms 让日志落盘）；注射脚本后**再 ping 一次**校验是否真被接管，失败则明确报错而非假成功。
   - 验证：`tsc --noEmit` 零错误、`npm test` 19/19、`npm run build` 成功，`content.js` 与 `chunks/popup-*.js` 构建标识一致 = `2026-10-22T14:30:34.554Z`。
   - 本轮判定标准（给用户）：重载后页脚应显示“构建 10-22 22:30”，日志应变成“iTEST 同步成功：2 项未提交作业”。
+
+- 2026-10-22 22:36（**真正根因：构建产物与浏览器加载目录不是同一个**）：
+  - 第三次贴图仍为旧包后，直接读 Edge `Secure Preferences` 定位扩展注册路径，得到 `D:\Users\lenovo\Desktop\作业集合\extension\.output\chrome-mv3`（扩展 id `lnlimlpboefcjcbohdakpiaonibbonjk`）。
+  - 即 `C:\Users\lenovo\WorkBuddy\Worktrees\作业集合\master-89f86879` 只是 `D:\Users\lenovo\Desktop\作业集合` 的 **git worktree**（分支 `workbuddy/master-89f86879`，主仓 `master`）。此前所有构建都写在 worktree，桌面主副本一直停在 `03a73f3`（无 iTEST 解析器）→ 浏览器只能显示旧行为，与代码无关。
+  - 处置：worktree 提交 `d3543ce` → `git -C "D:/Users/lenovo/Desktop/作业集合" merge --ff-only workbuddy/master-89f86879` → **在 D 盘工程执行 `npm run build`**。D 盘产物 22:36 生成，buildId `2026-10-22T14:36:03.857Z`，`content.js` 15.02 kB，含 iTEST 解析器、「重载扩展」按钮、`body{width:680px}`；D 盘 `tsc --noEmit` 零错误、`npm test` 19/19。
+  - **流程固化**：以后改完必须“worktree 验证 → 提交 → 快进合并到 D 盘 → 在 D 盘 build → 浏览器重载”，已写入 `.workbuddy/memory/MEMORY.md`，避免再次把改动构建到没人加载的目录。
