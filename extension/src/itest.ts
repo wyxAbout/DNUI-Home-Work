@@ -11,9 +11,10 @@
 //
 // “未提交”语义（对应平台“待完成”桶）：
 //   - 待完成 / 仍可作答：状态提示含“考试已开始，请进入作答”“进入考试”等
-//     → 归类为 pending（纳入看板）。
+//     → 归类为 pending（纳入看板“未完成”）。
 //   - 缺考 / 已错过：状态提示含“考试已结束，无法参加考试”或“缺考”标签
-//     → 归类为 absent（同样属于平台“待完成”计数，纳入看板并提示已错过截止）。
+//     → 归类为 absent。该考试已过截止时间、无法再作答，因此【不】计入看板“未完成”，
+//       仅在同步消息里提示“已错过截止时间”，避免把无法操作的过期项混入待办。
 //   - 已完成：状态提示含“已完成 / 已提交 / 已交卷 / 成绩已出”等 → 排除。
 //
 // 实现约束（同东软交接文档，不猜测）：
@@ -122,13 +123,14 @@ export function parseItestExamPageText(text: string): {
   return { pendingCount, items };
 }
 
-// 把“未提交”考试映射为 Assignment（纯函数，便于单测）。
+// 把“仍可作答”的考试（pending）映射为 Assignment（纯函数，便于单测）。
+// 注意：absent（已错过截止时间）不在此映射，避免混入看板“未完成”。
 export function mapItestAssignments(
   items: ParsedItestItem[],
   ctx: { courseId: string; courseName: string; url: string; syncedAt: string },
 ): Assignment[] {
   return items
-    .filter((it) => it.status === 'pending' || it.status === 'absent')
+    .filter((it) => it.status === 'pending')
     .map((it) => ({
       id: `itest:${it.examId ?? slugifyCourse(it.title)}`,
       platformId: 'itest',
@@ -268,26 +270,33 @@ function buildResult(
   const courseName = extractClassName(doc) ?? 'iTEST';
   const courseId = slugifyCourse(courseName);
 
-  // 确实没有任何待办：replaceAll 整组清空该平台缓存，
-  // 避免因班级名提取波动导致 courseId 不一致而残留旧条目。
-  if (nonDone.length === 0) {
+  // 只把“仍可作答”的 pending 项纳入看板“未完成”；absent（已错过截止）已被上游排除。
+  const assignments = mapItestAssignments(nonDone, { courseId, courseName, url, syncedAt });
+  const pending = assignments.length;
+  const absent = nonDone.length - pending;
+
+  // 没有任何“可操作”的未提交项（全部已错过截止，或真的为空）：整组清空该平台缓存，
+  // 避免过期项或旧条目残留在看板里。消息里仍提示错过的项数，便于核对。
+  if (pending === 0) {
+    let message: string;
+    if (absent > 0) {
+      message = `iTEST 考试页：无待完成考试（另有 ${absent} 项已错过截止时间，不计入未完成）。`;
+    } else {
+      message = 'iTEST 考试页：暂无待完成考试。';
+    }
     return {
       status: 'success',
       assignments: [],
-      message: 'iTEST 考试页：暂无待完成考试。',
+      message,
       replaceAll: true,
     };
   }
 
-  const assignments = mapItestAssignments(nonDone, { courseId, courseName, url, syncedAt });
-  const pending = nonDone.filter((i) => i.status === 'pending').length;
-  const absent = nonDone.length - pending;
-
   let message: string;
   if (absent > 0) {
-    message = `iTEST 考试页：待完成 ${nonDone.length} 项（其中 ${pending} 项仍可作答，${absent} 项已错过截止时间）。`;
+    message = `iTEST 考试页：待完成 ${pending} 项（另有 ${absent} 项已错过截止时间，不计入未完成）。`;
   } else {
-    message = `iTEST 考试页：待完成 ${nonDone.length} 项。`;
+    message = `iTEST 考试页：待完成 ${pending} 项。`;
   }
 
   return {

@@ -77,7 +77,7 @@ test('未提交集合 = pending + absent，与“待完成”汇总一致', () =
   assert.equal(nonDone.length, pendingCount);
 });
 
-test('映射到 Assignment：字段与分组维度正确', () => {
+test('映射到 Assignment：仅 pending（仍可作答）进入未完成，absent 被排除', () => {
   const { items } = parseItestExamPageText(SAMPLE);
   const assignments = mapItestAssignments(items, {
     courseId: '25级软工_数据科学B2班',
@@ -86,7 +86,9 @@ test('映射到 Assignment：字段与分组维度正确', () => {
     syncedAt: '2026-10-22T00:00:00.000Z',
   });
 
-  assert.equal(assignments.length, 2);
+  // 真实样本里 B2U6 为可作答的 pending，B2U5 已缺考（absent）。
+  // 用户要求“已过期的不出现在未完成里”，故只应有 1 项。
+  assert.equal(assignments.length, 1);
   const a0 = assignments.find((a) => a.id === 'itest:1000107669');
   assert.ok(a0);
   assert.equal(a0?.platformId, 'itest');
@@ -97,11 +99,28 @@ test('映射到 Assignment：字段与分组维度正确', () => {
   assert.equal(a0?.status, 'unsubmitted');
   assert.equal(a0?.source, 'home');
   assert.equal(a0?.url, 'https://itestcloud.unipus.cn/utest/itest/s/exam');
+  // 已缺考的 B2U5 不应出现在未完成列表里。
+  assert.equal(assignments.find((a) => a.id === 'itest:1000106858'), undefined);
 });
 
-test('缺考项无 examId 时回退到标题 slug 作为稳定 ID', () => {
+test('absent（已错过截止时间）项被排除，不计入未完成', () => {
+  const items: ParsedItestItem[] = [
+    { examId: '1', title: '仍可作答', type: null, tag: null, dueAt: null, status: 'pending' },
+    { examId: '2', title: '已错过', type: null, tag: null, dueAt: null, status: 'absent' },
+  ];
+  const assignments = mapItestAssignments(items, {
+    courseId: 'c1',
+    courseName: 'C1',
+    url: 'https://itestcloud.unipus.cn/utest/itest/s/exam',
+    syncedAt: '2026-10-22T00:00:00.000Z',
+  });
+  assert.equal(assignments.length, 1);
+  assert.equal(assignments[0]?.id, 'itest:1');
+});
+
+test('仍可作答项（pending）无 examId 时回退到标题 slug 作为稳定 ID', () => {
   const fallback: ParsedItestItem[] = [
-    { examId: null, title: '某单元测试', type: null, tag: null, dueAt: null, status: 'absent' },
+    { examId: null, title: '某单元测试', type: null, tag: null, dueAt: null, status: 'pending' },
   ];
   const assignments = mapItestAssignments(fallback, {
     courseId: 'c1',
@@ -109,5 +128,6 @@ test('缺考项无 examId 时回退到标题 slug 作为稳定 ID', () => {
     url: 'https://itestcloud.unipus.cn/utest/itest/s/exam',
     syncedAt: '2026-10-22T00:00:00.000Z',
   });
+  assert.equal(assignments.length, 1);
   assert.equal(assignments[0]?.id, 'itest:某单元测试');
 });
