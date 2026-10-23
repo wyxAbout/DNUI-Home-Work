@@ -346,8 +346,10 @@ function App() {
         void appendLog('warn', 'diagnostic', '诊断：页面未返回结构，可能不是平台页面');
         return;
       }
-      // 优先采用 notice.chaoxing.com 框架（收件箱真实内容所在）；否则回退到“有文本/首个”框架。
+      // 优先采用带“考试详情抓取探测”结果的框架（收件箱列表所在，且探测已端到端执行）；
+      // 否则 notice.chaoxing.com 框架；再回退到“有文本/首个”框架。
       const report =
+        reports.find((r) => r.examProbe) ??
         reports.find((r) => r.hostname.includes('notice.chaoxing.com')) ??
         reports.find((r) => r.mainText) ??
         reports[0]!;
@@ -575,6 +577,27 @@ function App() {
                 </ul>
               )}
             </div>
+
+            {report.examProbe && (
+              <div className="finding-block">
+                <span className="finding-key">考试详情抓取探测（fetch 一条考试通知详情）</span>
+                {report.examProbe.error ? (
+                  <p className="finding-empty">探测失败：{report.examProbe.error}</p>
+                ) : report.examProbe.parsed ? (
+                  <ul className="finding-list">
+                    <li key="src"><code>GET</code> {report.examProbe.source} → {report.examProbe.status}</li>
+                    <li key="course">课程：{report.examProbe.parsed.courseName || '（空）'}</li>
+                    <li key="exam">考试：{report.examProbe.parsed.examTitle || '（空）'}</li>
+                    <li key="start">开始：{report.examProbe.parsed.startAt ?? '未解析到'}</li>
+                    <li key="end">结束：{report.examProbe.parsed.endAt ?? '未解析到'}</li>
+                  </ul>
+                ) : (
+                  <p className="finding-empty">
+                    fetch 返回 {report.examProbe.status}，但未解析到考试字段（正文样本见诊断 JSON 的 examProbe.textSample）
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="finding-block">
               <span className="finding-key">作业项解析（状态 / 剩余次数 / 动作）</span>

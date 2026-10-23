@@ -94,8 +94,9 @@ const EXAM_DETAIL_TEXT =
   '开始时间：2026-10-21 11:18 结束时间：2026-10-21 11:40 考试形式：自主考试 ' +
   '考试过程中如果出现页面卡死、题目空白情况，请尝试切换网络或退出重新进入考试 考试 25级-大学物理-课后测试4 复制 转发';
 
-test('normalizeChaoxingExamTime：日期时间归一为本地 ISO', () => {
+test('normalizeChaoxingExamTime：日期时间归一为本地 ISO（空白可有可无）', () => {
   assert.equal(normalizeChaoxingExamTime('2026-10-21 11:40'), '2026-10-21T11:40');
+  assert.equal(normalizeChaoxingExamTime('2026-10-2111:40'), '2026-10-21T11:40');
   assert.equal(normalizeChaoxingExamTime('2026-10-21 11:40:25'), '2026-10-21T11:40:25');
   assert.equal(normalizeChaoxingExamTime('无时间'), null);
   assert.equal(normalizeChaoxingExamTime(''), null);
@@ -103,6 +104,19 @@ test('normalizeChaoxingExamTime：日期时间归一为本地 ISO', () => {
 
 test('parseChaoxingExamDetailText：解析截图正文中的课程/考试名/开始/结束时间', () => {
   const d = parseChaoxingExamDetailText(EXAM_DETAIL_TEXT);
+  assert.ok(d);
+  assert.equal(d?.courseName, '大学物理');
+  assert.equal(d?.examTitle, '25级-大学物理-课后测试4');
+  assert.equal(d?.startAt, '2026-10-21T11:18');
+  assert.equal(d?.endAt, '2026-10-21T11:40');
+});
+
+// 2026-10-23 首次抓取失败根因：DOMParser 的 textContent 把相邻块级元素无空格拼接。
+test('parseChaoxingExamDetailText：textContent 无空格拼接形态也能解析', () => {
+  const glued =
+    '考试通知转发收藏课程名称：大学物理考试名称：25级-大学物理-课后测试4' +
+    '开始时间：2026-10-2111:18结束时间：2026-10-2111:40考试形式：自主考试';
+  const d = parseChaoxingExamDetailText(glued);
   assert.ok(d);
   assert.equal(d?.courseName, '大学物理');
   assert.equal(d?.examTitle, '25级-大学物理-课后测试4');

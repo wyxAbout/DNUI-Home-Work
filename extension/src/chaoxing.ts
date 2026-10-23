@@ -88,8 +88,9 @@ export interface ChaoxingExamDetail {
 }
 
 // 把 “YYYY-MM-DD HH:MM(:SS)?” 归一为本地 ISO（YYYY-MM-DDTHH:MM(:SS)?）。
+// 日期与时刻之间的空白可选：textContent 会把相邻元素无空格拼接（“2026-10-2111:18”）。
 export function normalizeChaoxingExamTime(raw: string): string | null {
-  const m = (raw ?? '').match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?::(\d{2}))?/);
+  const m = (raw ?? '').match(/(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2})(?::(\d{2}))?/);
   if (!m) return null;
   const date = m[1] ?? '';
   const hm = m[2] ?? '';
@@ -98,30 +99,31 @@ export function normalizeChaoxingExamTime(raw: string): string | null {
 }
 
 // 纯函数：从考试通知详情页正文中解析结构化字段。
-// 证据 = 用户截图（详情页按行渲染“课程名称：/考试名称：/开始时间：/结束时间：/考试形式：”），
-// 全文 textContent 折叠空白后按标签正则截取，截到下一个标签或结尾为止。
+// 证据 = 用户截图（详情页按行渲染“课程名称：/考试名称：/开始时间：/结束时间：/考试形式：”）。
+// 关键：DOMParser 的 textContent 会把相邻块级元素无空格拼接（“大学物理考试名称：…”，
+// 2026-10-23 首次抓取失败即此因），故字段停止点用零宽前瞻（不要求空白）、日期与时刻间空白可选。
 // 既无“考试名称”也无“结束时间”→ 视为不是考试详情页，返回 null。
 export function parseChaoxingExamDetailText(text: string): ChaoxingExamDetail | null {
   const flat = (text ?? '').replace(/\s+/g, ' ').trim();
   if (!flat) return null;
   const grab = (label: string, stopLabels: string[]): string => {
-    const stops = stopLabels.map((s) => `\\s+${s}`).join('|');
-    const re = new RegExp(`${label}\\s*[：:]\\s*(.+?)?(?:${stops}|$)`);
+    const stops = stopLabels.map((s) => `(?=${s})`).join('|');
+    const re = new RegExp(`${label}\\s*[：:]\\s*(.*?)\\s*(?:${stops}|$)`);
     const m = flat.match(re);
     return (m?.[1] ?? '').trim();
   };
   const courseName = grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']);
   const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
-  const startRaw = flat.match(/开始时间\s*[：:]\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/);
-  const endRaw = flat.match(/结束时间\s*[：:]\s*(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)/);
+  const startRaw = flat.match(/开始时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
+  const endRaw = flat.match(/结束时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
   if (!examTitle && !endRaw) {
     return null;
   }
   return {
     courseName,
     examTitle,
-    startAt: startRaw ? normalizeChaoxingExamTime(startRaw[1] ?? '') : null,
-    endAt: endRaw ? normalizeChaoxingExamTime(endRaw[1] ?? '') : null,
+    startAt: startRaw ? normalizeChaoxingExamTime(`${startRaw[1] ?? ''} ${startRaw[2] ?? ''}`) : null,
+    endAt: endRaw ? normalizeChaoxingExamTime(`${endRaw[1] ?? ''} ${endRaw[2] ?? ''}`) : null,
   };
 }
 

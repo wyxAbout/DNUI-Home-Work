@@ -70,6 +70,24 @@ export interface DiagnosticAssignmentSummary {
   total: number;
 }
 
+// 学习通考试详情抓取探测：在收件箱框架内直接 fetch 一条考试通知的详情 data-url，
+// 回传 fetch 状态 + 结构化解析结果 + 去敏正文样本，用于端到端验证“注意时间”解析链路。
+export interface DiagnosticExamProbe {
+  // 被探测的详情路径（仅 pathname，去敏）。
+  source: string;
+  ok: boolean;
+  status: number;
+  parsed: {
+    courseName: string;
+    examTitle: string;
+    startAt: string | null;
+    endAt: string | null;
+  } | null;
+  // 详情正文样本（去敏截断），用于人工核对标签文本形态。
+  textSample: string;
+  error: string | null;
+}
+
 export interface DiagnosticReport {
   url: string;
   title: string;
@@ -89,6 +107,8 @@ export interface DiagnosticReport {
   mainText: string;
   // 疑似作业/课程相关接口路径（仅同源 pathname，已剥离查询参数）。
   requests: DiagnosticRequest[];
+  // 学习通考试详情抓取探测结果（仅学习通页面且存在消息列表时非空）。
+  examProbe: DiagnosticExamProbe | null;
   // 作业列表汇总（如“已完成8/18”），无则为 null。
   assignmentSummary: DiagnosticAssignmentSummary | null;
   // 聚焦提取的作业项（序号 / 标题 / 剩余次数 / 状态 / 动作 / 进度）。
@@ -429,6 +449,79 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
     return { items, summary, progressBars };
   };
 
+  // 学习通考试详情抓取探测（自包含，注入后独立运行）：
+  // 取首个标题以“考试”开头的消息项的 openNotice[data-url]，fetch（同域带 cookie，
+  // 等价手动点开、不导航不进答题）后按 src/chaoxing.ts 同规则解析并回传证据。
+  const probeExamDetail = async (): Promise<DiagnosticExamProbe | null> => {
+    try {
+      if (!/(^|\.)chaoxing\.com$/.test(window.location.hostname)) return null;
+      let target: Element | null = null;
+      for (const li of Array.from(document.querySelectorAll('li.dataBody_item'))) {
+        const t = (li.querySelector('.notice_title')?.textContent || '').trim();
+        if (/^考试/.test(t)) {
+          target = li.querySelector('.openNotice[data-url]');
+          break;
+        }
+      }
+      if (!target) target = document.querySelector('li.dataBody_item .openNotice[data-url]');
+      const rel = target?.getAttribute('data-url') || '';
+      if (!rel) return null;
+      const abs = new URL(rel, window.location.href).toString();
+      let source = rel;
+      try {
+        source = new URL(abs).pathname;
+      } catch {
+        /* 保持 rel */
+      }
+      const res = await fetch(abs, { credentials: 'include' });
+      const status = res.status;
+      const html = res.ok ? await res.text() : '';
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const raw = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+      // 内联解析（与 src/chaoxing.ts 的 parseChaoxingExamDetailText 同规则；
+      // textContent 相邻元素无空格拼接，停止点用零宽前瞻、日期与时刻间空白可选）。
+      const grab = (label: string, stopLabels: string[]): string => {
+        const stops = stopLabels.map((s) => `(?=${s})`).join('|');
+        const m = raw.match(new RegExp(`${label}\\s*[：:]\\s*(.*?)\\s*(?:${stops}|$)`));
+        return (m?.[1] || '').trim();
+      };
+      const grabTime = (label: string): string | null => {
+        const m = raw.match(
+          new RegExp(`${label}\\s*[：:]\\s*(\\d{4}-\\d{2}-\\d{2})\\s*(\\d{2}:\\d{2}(?::\\d{2})?)`),
+        );
+        return m ? `${m?.[1] || ''}T${m?.[2] || ''}` : null;
+      };
+      const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
+      const endAt = grabTime('结束时间');
+      const parsed =
+        examTitle || endAt
+          ? {
+              courseName: grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']),
+              examTitle,
+              startAt: grabTime('开始时间'),
+              endAt,
+            }
+          : null;
+      return {
+        source,
+        ok: res.ok,
+        status,
+        parsed,
+        textSample: redactLongTokens(raw).slice(0, 800),
+        error: null,
+      };
+    } catch (e) {
+      return {
+        source: '',
+        ok: false,
+        status: 0,
+        parsed: null,
+        textSample: '',
+        error: String(e).slice(0, 200),
+      };
+    }
+  };
+
   // ============ 主流程 ============
 
   // 1) 安装轻量网络钩子：记录同源、疑似作业相关接口的 pathname（不含 query / 不含响应体）。
@@ -547,6 +640,9 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
 
   const parsed = extractAssignments(mainText);
 
+  // 7) 学习通页面附加：考试详情抓取探测（端到端验证 fetch+解析链路）。
+  const examProbe = await probeExamDetail();
+
   return {
     url: safePageUrl(),
     title: document.title.slice(0, 200),
@@ -558,6 +654,7 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
     menuItems,
     mainText,
     requests: requests.slice(0, 60),
+    examProbe,
     assignmentSummary: parsed.summary,
     assignments: parsed.items,
     classNames: [...classNames].sort(),
