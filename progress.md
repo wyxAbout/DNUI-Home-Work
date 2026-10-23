@@ -79,4 +79,13 @@
   - 第三次贴图仍为旧包后，直接读 Edge `Secure Preferences` 定位扩展注册路径，得到 `D:\Users\lenovo\Desktop\作业集合\extension\.output\chrome-mv3`（扩展 id `lnlimlpboefcjcbohdakpiaonibbonjk`）。
   - 即 `C:\Users\lenovo\WorkBuddy\Worktrees\作业集合\master-89f86879` 只是 `D:\Users\lenovo\Desktop\作业集合` 的 **git worktree**（分支 `workbuddy/master-89f86879`，主仓 `master`）。此前所有构建都写在 worktree，桌面主副本一直停在 `03a73f3`（无 iTEST 解析器）→ 浏览器只能显示旧行为，与代码无关。
   - 处置：worktree 提交 `d3543ce` → `git -C "D:/Users/lenovo/Desktop/作业集合" merge --ff-only workbuddy/master-89f86879` → **在 D 盘工程执行 `npm run build`**。D 盘产物 22:36 生成，buildId `2026-10-22T14:36:03.857Z`，`content.js` 15.02 kB，含 iTEST 解析器、「重载扩展」按钮、`body{width:680px}`；D 盘 `tsc --noEmit` 零错误、`npm test` 19/19。
-  - **流程固化**：以后改完必须“worktree 验证 → 提交 → 快进合并到 D 盘 → 在 D 盘 build → 浏览器重载”，已写入 `.workbuddy/memory/MEMORY.md`，避免再次把改动构建到没人加载的目录。
+  - **流程固化**：以后改完必须"worktree 验证 → 提交 → 快进合并到 D 盘 → 在 D 盘 build → 浏览器重载"，已写入 `.workbuddy/memory/MEMORY.md`，避免再次把改动构建到没人加载的目录。
+
+## 2026-10-23
+
+- 启动 **批改网（pigai.org）模块**制作（东软、iTEST 已完成真实解析，批改网此前为内联占位）。按项目"先取证、再落地"硬约束推进：
+  - 新增 `extension/src/pigai.ts`：独立适配器模块，结构与 `itest.ts` 对齐——导出 `extractPigaiAssignments(doc,url,{allowAutoOpen})`，当前为**占位实现**：仅处理 `pigai.org` 域（非 pigai 静默 `null` 双保险），登录态判定与真实解析均留 `TODO`，返回 `needs-verification` 且**不覆盖**上次成功缓存（与东软/iTEST 占位行为一致）。文件头注明入口（`www.pigai.org`）、约束与已规划的真实解析纯函数签名（`parsePigaiPageText` / `classifyPigaiStatus` / `mapPigaiAssignments`）。
+  - `platforms.ts`：批改网适配器从内联 `notReadyResult` 改为调用 `extractPigaiAssignments`；删除因此变为死代码的 `notReadyResult` 函数。`content.ts` 的 `matches` 与 `wxt.config.ts` 的 `host_permissions` 此前已含 `pigai.org`，故**壳层本就就绪，仅缺真实页面解析**。
+  - 验证：`npm run compile` 零错误；`npm test` 20/20 通过（未破坏既有东软/iTEST 单测）；`npm run build` 成功（content.js 15.02→15.27 kB，产物落在 D 盘 `.output/chrome-mv3/`，即浏览器实际加载目录）。
+  - 待用户执行的关键一步（对应东软/iTEST 小任务 1/2）：在 Edge 中**登录批改网并打开作业/写作任务列表页**，点击看板"诊断当前页面"，把去敏摘要（`hostname`/`mainText`/`requests`/`tabs`/`menuItems`）贴回。据此确认"未提交"真实文案、列表结构与截止时间字段后，再落地 `pigai.ts` 的真实解析并补 `pigai.test.ts`。
+  - 说明：批改网真实解析器**不能凭猜测落地**——项目硬规矩禁止猜 API 路径、字段名或"未提交"状态文案，且无已登录作业页证据。本次仅完成模块骨架与接线，使其达到 iTEST 取证前的同形态。

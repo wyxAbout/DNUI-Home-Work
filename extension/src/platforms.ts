@@ -6,6 +6,7 @@ import {
 } from './models';
 import { extractNeusoftAssignments } from './neusoft';
 import { extractItestAssignments } from './itest';
+import { extractPigaiAssignments } from './pigai';
 
 export interface PlatformAdapter {
   id: PlatformId;
@@ -28,14 +29,6 @@ function hostMatches(url: string, hosts: string[]): boolean {
   }
 }
 
-function notReadyResult(message: string): PlatformExtractionResult {
-  return {
-    status: 'needs-verification',
-    assignments: [],
-    message,
-  };
-}
-
 const adapters: PlatformAdapter[] = [
   {
     id: 'neusoft',
@@ -47,7 +40,7 @@ const adapters: PlatformAdapter[] = [
     id: 'pigai',
     label: PLATFORM_LABELS.pigai,
     matchesUrl: (url) => hostMatches(url, PLATFORM_HOSTS.pigai),
-    extract: () => notReadyResult('批改网页面解析器待验证，暂未更新已有作业数据。'),
+    extract: (document, url, options) => extractPigaiAssignments(document, url, options),
   },
   {
     id: 'itest',
