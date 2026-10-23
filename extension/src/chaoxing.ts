@@ -42,12 +42,13 @@
 //       部分考试通知详情不含“开始时间/结束时间”标签，而是
 //       “考试时间： MM-DD HH:MM 至 MM-DD HH:MM”（无年份，其后可能附“考试时长： N分钟”）。
 //       解析规则：考试名称在“考试时间/考试时长”标签前截断（否则会吞掉整段时间文本）；
-//       “考试时间”区间两端归一为 startAt/endAt。缺省年份“就近补齐 + 跨年前翻”：
-//       先按调用方年份补齐；若补齐后的结束时间早于 now-180 天（典型：12 月发 1 月考，
-//       按当前年补会落进遥远的过去），判为跨年通知、起止时间整体 +1 年。
-//       残余局限（如实记录）：补齐后已落后超过 180 天的陈旧过期通知会被翻到下一年——
-//       但收件箱按时间倒序、首屏几乎不含如此陈旧的通知，且平台侧详情不带年份、
-//       单条数据本身无法彻底消除歧义，只能用“通知面向近期考试”这一事实做启发式。
+//       “考试时间”区间两端归一为 startAt/endAt。
+//       **年份消歧（彻底解决跨年，2026-10-23 收件箱诊断证据）**：详情页自带时间无年份，
+//       故用“列表发送时间”锚定真实年份——收件箱按时间倒序、每行 span.notice_time 含
+//       “MM-DD(星期X) HH:MM”，由 resolveChaoxingNoticeYears 以顶部项为锚向下推断每项年份
+//       （MM-DD 反向跳变即跨年 -1）。再以该年份补齐“考试时间”的 MM-DD；若考试 MM-DD 小于通知
+//       MM-DD（如 12 月通知 1 月考）再加 1 年。此路径无需任何“当前年”猜算，跨年不再误判。
+//       回退：若列表时间缺失（置顶/异常行），沿用当前年 + “早于 now-180 天则 +1 年”的启发式兜底。
 //   2. 交卷成功（自动化不可行，已用证据坐实，须如实记录）：
 //      用户规则“点击‘考试’后若显示‘交卷成功（提交方式：学生交卷）’则判定作业结束”。
 //      但 2026-10-23 的诊断证实：收件箱“通知详情”页只渲染“课程名称/考试名称/起止时间/考试形式”
@@ -94,6 +95,9 @@ export interface RawChaoxingItem {
   title: string;
   sender: string;
   detailUrl: string; // 已拼接为绝对地址
+  // 列表行的发送时间文本（span.notice_time.fr，如 "10-21(星期三) 11:19"），用于跨年消歧。
+  // 置顶/异常行可能无时间，故可缺省。
+  noticeTime?: string;
 }
 
 // 考试通知详情页解析结果（字段名与截图中的结构化文本一一对应）。
@@ -125,10 +129,14 @@ export function normalizeChaoxingExamTime(raw: string): string | null {
 // 既无“考试名称”也无任何可解析的时间 → 视为不是考试详情页，返回 null。
 export interface ParseChaoxingExamDetailOptions {
   // 格式 2（“考试时间：MM-DD HH:MM 至 MM-DD HH:MM”）不带年份，用该年份补齐；
-  // 缺省取“当前年份”（调用方传同步时刻对应的年份）。
+  // 为“列表发送时间锚定的真实年份”（见 resolveChaoxingNoticeYears），缺省取当前年份。
   year?: number;
   // “就近补年”的基准时刻（缺省取当前时刻）；单测传入固定值以消除对真实时钟的依赖。
   nowMs?: number;
+  // 通知本身的“月-日”数值（如 12-25 → 1225）。考试 MM-DD 小于通知 MM-DD（如 12 月通知 1 月考）
+  // 即跨年，整体 +1 年。该规则精确无歧义，取代旧的“落后 180 天即翻年”启发式；
+  // 缺省（无通知时间）时回退到 180 天阈值启发式。
+  noticeMonthDay?: number;
 }
 
 export function parseChaoxingExamDetailText(
@@ -175,6 +183,10 @@ export function parseChaoxingExamDetailText(
   const nowMs = options?.nowMs ?? Date.now();
   const YEARLESS_ROLL_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
   const yearless = (date: string | undefined): boolean => !!date && /^\d{2}-\d{2}$/.test(date);
+  const mdOf = (date: string | undefined): number | null => {
+    const m = (date ?? '').match(/(\d{1,2})-(\d{1,2})/);
+    return m ? Number(m[1]) * 100 + Number(m[2]) : null;
+  };
   const withYear = (date: string, hm: string, yearOffset = 0): string | null => {
     if (!/^\d{2}-\d{2}$/.test(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
     const full = /^\d{4}-/.test(date) ? date : `${baseYear + yearOffset}-${date}`;
@@ -185,11 +197,21 @@ export function parseChaoxingExamDetailText(
     const m = iso.match(/^(\d{4})-(\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)$/);
     return m ? `${Number(m[1]) + n}-${m[2] ?? ''}` : null;
   };
+  // 跨年判定（精确）：同域无年份“考试时间”的补齐基准是“通知所在年份”；
+  // 若考试 MM-DD 小于通知 MM-DD（如 12 月通知 1 月考），考试实际落在次年 → +1 年。
+  // 逐端独立比较，可正确处理“12-25 至 01-10”（开始当年、结束次年）。
+  const maybeBump = (iso: string | null, dateStr: string | undefined): string | null => {
+    if (!iso) return null;
+    const nmd = options?.noticeMonthDay;
+    const emd = mdOf(dateStr);
+    if (nmd != null && emd != null && emd < nmd) return shiftYear(iso, 1);
+    return iso;
+  };
   const resolveRange = (): { startAt: string | null; endAt: string | null } => {
-    const startAt = withYear(rangeRaw?.[1] ?? '', rangeRaw?.[2] ?? '');
-    const endAt = withYear(rangeRaw?.[3] ?? '', rangeRaw?.[4] ?? '');
-    // 仅对“无年份”的结束时间做跨年前翻；带年份的日期本身无歧义。
-    if (endAt && yearless(rangeRaw?.[3])) {
+    const startAt = maybeBump(withYear(rangeRaw?.[1] ?? '', rangeRaw?.[2] ?? ''), rangeRaw?.[1]);
+    const endAt = maybeBump(withYear(rangeRaw?.[3] ?? '', rangeRaw?.[4] ?? ''), rangeRaw?.[3]);
+    // 回退：无通知时间可供精确判定时，才用“落后 180 天即翻年”的粗略启发式。
+    if (options?.noticeMonthDay == null && endAt && yearless(rangeRaw?.[3])) {
       const endT = new Date(endAt).getTime();
       if (!Number.isNaN(endT) && nowMs - endT > YEARLESS_ROLL_THRESHOLD_MS) {
         const startAt2 = startAt ? shiftYear(startAt, 1) : null;
@@ -291,6 +313,29 @@ function waitFor(
   });
 }
 
+// 有界并发：收件箱可能有 50+ 条考试通知，若用 Promise.all 一次性开 50 个隐藏 iframe，
+// 浏览器渲染/网络排队极易导致部分 iframe 超时、详情读不到而退化为“未提供截止时间”。
+// 限制同时进行的详情抓取数（默认 5），既保住速度又避免把正常项误判成无截止。
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const idx = cursor;
+      cursor += 1;
+      results[idx] = await fn(items[idx]!);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+  );
+  return results;
+}
+
 // 仅依赖诊断证据中的稳定 class（dataBody_item / notice_title / notice_time / receiverName /
 // openNotice[data-url] / li[data-id]），不猜任何未出现在证据里的字段。
 function readRawItems(doc: Document): RawChaoxingItem[] {
@@ -307,9 +352,53 @@ function readRawItems(doc: Document): RawChaoxingItem[] {
     const detailUrl = /^https?:\/\//i.test(rel)
       ? rel
       : `https://notice.chaoxing.com${rel}`;
-    out.push({ id, title, sender, detailUrl });
+    const noticeTime = (li.querySelector('.notice_time')?.textContent ?? '').replace(/\s+/g, ' ').trim() || undefined;
+    out.push({ id, title, sender, detailUrl, noticeTime });
   }
   return out;
+}
+
+// 从收件箱列表的“发送时间”为每条通知锚定真实年份（彻底解决跨年无年份歧义）。
+// 证据：诊断 DOM 中每条 li 含 span.notice_time（如 "10-21(星期三) 11:19"），且列表按时间倒序
+// （thead 的 "按时间排序" 升/降箭头）。同域详情页的“考试时间：MM-DD”无年份，默认按通知所在年份补齐；
+// 若考试 MM-DD 小于通知 MM-DD（如 12 月通知 1 月考），再加 1 年（见 parseChaoxingExamDetailText 的回退）。
+// 算法：以“最顶部项”为锚（与 now 差距 < 300 天判今年，否则去年），向下遍历；因列表倒序，
+// 当某项的 MM-DD “大于”上一项（时间向前跳）即跨年，年份 -1。
+export function resolveChaoxingNoticeYears(
+  items: RawChaoxingItem[],
+  nowMs: number,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  const thisYear = new Date(nowMs).getFullYear();
+  const mdOf = (s: string | undefined): number | null => {
+    const m = (s ?? '').match(/(\d{1,2})-(\d{1,2})/);
+    if (!m) return null;
+    const mo = Number(m[1]);
+    const da = Number(m[2]);
+    if (mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+    return mo * 100 + da;
+  };
+  let prevYear: number | null = null;
+  let prevMd: number | null = null;
+  for (const it of items) {
+    const md = mdOf(it.noticeTime);
+    if (md === null) {
+      // 置顶/异常行无时间文本：沿用上一项年份（不更新 prevMd，避免误判跨年）。
+      if (prevYear !== null) result.set(it.id, prevYear);
+      continue;
+    }
+    if (prevYear === null) {
+      const d = new Date(thisYear, Math.floor(md / 100) - 1, md % 100).getTime();
+      const diffDays = Math.abs(d - nowMs) / 86400000;
+      prevYear = diffDays > 300 ? thisYear - 1 : thisYear;
+    } else if (md > (prevMd ?? md)) {
+      // 倒序列表中 MM-DD 反而更大 → 跨年。
+      prevYear -= 1;
+    }
+    result.set(it.id, prevYear);
+    prevMd = md;
+  }
+  return result;
 }
 
 // 读取考试通知详情页“已渲染的实时 DOM”正文（关键修复，2026-10-23 确诊并落地）。
@@ -397,18 +486,32 @@ export async function extractChaoxingAssignments(
 
   const syncedAt = new Date().toISOString();
   const nowMs = Date.now();
-  // 格式 2 详情（“考试时间：MM-DD HH:MM 至 …”）无年份，按同步时刻所在年份补齐（见头部规则 1b）。
+  // 跨年消歧：用列表发送时间（倒序 + notice_time）给每条通知锚定真实年份，
+  // 作为该通知详情页无年份“考试时间：MM-DD”的补齐基准。
+  const years = resolveChaoxingNoticeYears(raw, nowMs);
   const detailYear = new Date(nowMs).getFullYear();
 
   // 考试通知：逐条读取详情页“已渲染 DOM”解析“课程/考试名/开始/结束时间”（“注意时间”判定）。
   // 列表页与详情页同域 notice.chaoxing.com，自建隐藏 iframe 等价于手动点开“通知”
-  // （主页面不跳转、绝不误点“考试”按钮），并行取数以缩短等待；单条失败降级为列表信息（不臆测）。
-  const examDetails: (ChaoxingExamDetail | null)[] = await Promise.all(
-    examItems.map((item) =>
+  // （主页面不跳转、绝不误点“考试”按钮）。有界并发（默认 5）抓取，单条失败降级（不臆测）。
+  // 每条按其发送时间锚定年份、并以“通知月日”做精确跨年判定（noticeMonthDay）。
+  const noticeMonthDay = (s: string | undefined): number | undefined => {
+    const m = (s ?? '').match(/(\d{1,2})-(\d{1,2})/);
+    return m ? Number(m[1]) * 100 + Number(m[2]) : undefined;
+  };
+  const examDetails: (ChaoxingExamDetail | null)[] = await mapWithConcurrency(
+    examItems,
+    5,
+    async (item) =>
       readNoticeDetailText(doc, item.detailUrl).then((text) =>
-        text ? parseChaoxingExamDetailText(text, { year: detailYear, nowMs }) : null,
+        text
+          ? parseChaoxingExamDetailText(text, {
+              year: years.get(item.id) ?? detailYear,
+              nowMs,
+              noticeMonthDay: noticeMonthDay(item.noticeTime),
+            })
+          : null,
       ),
-    ),
   );
   const examAssignments: Assignment[] = examItems.map((item, i) =>
     mapChaoxingExamAssignment(item, examDetails[i] ?? null, { syncedAt, nowMs }),

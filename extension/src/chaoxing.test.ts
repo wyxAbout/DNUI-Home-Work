@@ -10,6 +10,7 @@ import {
   mapChaoxingExamAssignment,
   normalizeChaoxingExamTime,
   parseChaoxingExamDetailText,
+  resolveChaoxingNoticeYears,
   type RawChaoxingItem,
 } from './chaoxing.ts';
 
@@ -187,6 +188,85 @@ test('parseChaoxingExamDetailText：格式2自带年份时不翻年（日期本�
   assert.equal(d?.startAt, '2026-01-10T09:00');
   assert.equal(d?.endAt, '2026-01-10T10:30');
 });
+
+// ===== 跨年消歧（规则 1b 完整解法）：用列表发送时间锚定每条通知的真实年份 =====
+test('resolveChaoxingNoticeYears：列表倒序 + MM-DD 反向跳变即跨年 -1', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  // 倒序列表：10-21 → 09-14 → 12-25 → 11-20 → 03-11 → 12-25(次年)
+  const items: RawChaoxingItem[] = [
+    mkItem('A', '10-21(星期三) 11:19'),
+    mkItem('B', '09-14(星期一) 16:44'),
+    mkItem('C', '12-25(星期四) 08:47'),
+    mkItem('D', '11-20(星期四) 15:37'),
+    mkItem('E', '03-11(星期三) 09:12'),
+    mkItem('F', '12-25(星期四) 07:40'),
+  ];
+  const years = resolveChaoxingNoticeYears(items, nowMs);
+  assert.equal(years.get('A'), 2026); // 顶部锚定今年
+  assert.equal(years.get('B'), 2026); // 09-14 仍今年
+  assert.equal(years.get('C'), 2025); // 12-25 反向跳变 → 去年
+  assert.equal(years.get('D'), 2025); // 11-20 去年
+  assert.equal(years.get('E'), 2025); // 03-11 去年
+  assert.equal(years.get('F'), 2024); // 再反向跳变 → 前年
+});
+
+test('resolveChaoxingNoticeYears：置顶/无时间行沿用上一项年份', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  const items: RawChaoxingItem[] = [
+    mkItem('A', '10-21(星期三) 11:19'),
+    mkItem('PIN', ''), // 置顶无时间
+    mkItem('C', '12-25(星期四) 08:47'),
+  ];
+  const years = resolveChaoxingNoticeYears(items, nowMs);
+  assert.equal(years.get('A'), 2026);
+  assert.equal(years.get('PIN'), 2026); // 无时间 → 沿用 A 的 2026
+  assert.equal(years.get('C'), 2025); // 仍正确跨年
+});
+
+test('parseChaoxingExamDetailText：用锚定年份（2025）+ 通知月日，12月考试不再误判到2026', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  // 2025-12-25 发出的通知（noticeMonthDay=1225），详情“考试时间：12-25 …”，year 锚定 2025。
+  const d = parseChaoxingExamDetailText(
+    '课程名称：高数 考试名称：期末考试 考试时间： 12-25 09:00 至 12-25 10:30',
+    { year: 2025, nowMs, noticeMonthDay: 1225 },
+  );
+  assert.ok(d);
+  assert.equal(d?.endAt, '2025-12-25T10:30'); // 考试月日不早于通知月日 → 不翻年，正确落在 2025
+});
+
+test('parseChaoxingExamDetailText：2025-12 通知、1月考试，考试月日早于通知月日 → 翻到次年', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  // 通知 12-25（noticeMonthDay=1225），考试 01-10（月日 110 < 1225）→ 实际为次年 1 月。
+  const d = parseChaoxingExamDetailText(
+    '课程名称：高数 考试名称：期末考试 考试时间： 01-10 09:00 至 01-10 10:30',
+    { year: 2025, nowMs, noticeMonthDay: 1225 },
+  );
+  assert.ok(d);
+  assert.equal(d?.startAt, '2026-01-10T09:00');
+  assert.equal(d?.endAt, '2026-01-10T10:30'); // 精确跨年 +1 年
+});
+
+test('parseChaoxingExamDetailText：跨年考试区间（12-25 至 01-10）开始当年、结束次年', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  const d = parseChaoxingExamDetailText(
+    '课程名称：高数 考试名称：期末 考试时间： 12-25 09:00 至 01-10 10:30',
+    { year: 2025, nowMs, noticeMonthDay: 1225 },
+  );
+  assert.ok(d);
+  assert.equal(d?.startAt, '2025-12-25T09:00'); // 开始月日不早于通知 → 当年
+  assert.equal(d?.endAt, '2026-01-10T10:30'); // 结束月日早于通知 → 次年
+});
+
+// 测试辅助：造一条带发送时间的原始项。
+function mkItem(id: string, noticeTime: string): RawChaoxingItem {
+  return {
+    id,
+    title: '考试通知',
+    sender: '学习通知',
+    detailUrl: `https://notice.chaoxing.com/pc/notice/${id}/detail`,
+    noticeTime: noticeTime || undefined,
+  };
+}
 
 test('mapChaoxingExamAssignment：格式2详情→dueAt=结束时刻，按时间判定状态', () => {
   const now = new Date('2026-10-23T10:00:00').getTime();

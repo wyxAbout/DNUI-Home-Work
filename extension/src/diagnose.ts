@@ -470,6 +470,8 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
 
       const parseExam = (
         raw: string,
+        year: number,
+        noticeMonthDay?: number,
       ): { courseName: string; examTitle: string; startAt: string | null; endAt: string | null } | null => {
         const flat = (raw || '').replace(/\s+/g, ' ').trim();
         if (!flat) return null;
@@ -487,12 +489,16 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
           /考试时间\s*[：:]\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)\s*至\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/,
         );
         if (!examTitle && !endRaw && !rangeRaw) return null;
-        // 无年份的 MM-DD 按“当前年份”补齐；补齐后早于 now-180 天判为跨年通知、整体 +1 年
-        // （与 chaoxing.ts 规则 1b 的“就近补年”启发式一致）。
-        const year = new Date().getFullYear();
+        // 年份补齐：year 由调用方按“列表发送时间”锚定的真实年份传入（与 chaoxing.ts 规则 1b 一致）；
+        // 跨年用“考试 MM-DD < 通知 MM-DD”精确判定（如 12 月通知 1 月考 → 次年）。无通知时间时
+        // 回退到“落后 180 天即翻年”的粗略启发式。
         const nowMs = Date.now();
         const YEARLESS_ROLL_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
         const yearless = (d: string | undefined): boolean => !!d && /^\d{2}-\d{2}$/.test(d);
+        const mdOf = (d: string | undefined): number | null => {
+          const m = (d ?? '').match(/(\d{1,2})-(\d{1,2})/);
+          return m ? Number(m[1]) * 100 + Number(m[2]) : null;
+        };
         const rangeIso = (date: string | undefined, hm: string | undefined, offset = 0): string | null => {
           if (!date || !hm) return null;
           if (!/^\d{2}-\d{2}$/.test(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
@@ -502,21 +508,28 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
           const m = iso.match(/^(\d{4})-(\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)$/);
           return m ? `${Number(m[1]) + n}-${m[2] ?? ''}` : null;
         };
-        let startAt = startRaw
-          ? `${startRaw[1] ?? ''}T${startRaw[2] ?? ''}`
-          : rangeIso(rangeRaw?.[1], rangeRaw?.[2]);
-        let endAt = endRaw
-          ? `${endRaw[1] ?? ''}T${endRaw[2] ?? ''}`
-          : rangeIso(rangeRaw?.[3], rangeRaw?.[4]);
-        // 仅对“无年份”的结束时间做跨年前翻；带年份的日期本身无歧义。
-        if (!endRaw && endAt && yearless(rangeRaw?.[3])) {
+        const maybeBump = (iso: string | null, dateStr: string | undefined): string | null => {
+          if (!iso || noticeMonthDay == null) return iso;
+          const emd = mdOf(dateStr);
+          return emd != null && emd < noticeMonthDay ? shiftYear(iso, 1) : iso;
+        };
+        let startAt = maybeBump(
+          startRaw ? `${startRaw[1] ?? ''}T${startRaw[2] ?? ''}` : rangeIso(rangeRaw?.[1], rangeRaw?.[2]),
+          rangeRaw?.[1],
+        );
+        let endAt = maybeBump(
+          endRaw ? `${endRaw[1] ?? ''}T${endRaw[2] ?? ''}` : rangeIso(rangeRaw?.[3], rangeRaw?.[4]),
+          rangeRaw?.[3],
+        );
+        // 回退：无通知时间可供精确判定时，才用“落后 180 天即翻年”的粗略启发式。
+        if (noticeMonthDay == null && !endRaw && endAt && yearless(rangeRaw?.[3])) {
           const endT = new Date(endAt).getTime();
           if (!Number.isNaN(endT) && nowMs - endT > YEARLESS_ROLL_THRESHOLD_MS) {
-            const startAt2 = startAt ? shiftYear(startAt, 1) : null;
-            const endAt2 = shiftYear(endAt, 1);
-            if (endAt2) {
-              startAt = startAt2;
-              endAt = endAt2;
+            const s2 = startAt ? shiftYear(startAt, 1) : null;
+            const e2 = shiftYear(endAt, 1);
+            if (e2) {
+              startAt = s2;
+              endAt = e2;
             }
           }
         }
@@ -528,12 +541,27 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
         };
       };
 
+      // 由列表行的发送时间文本推导该通知的“真实年份”与“月日”（与 resolveChaoxingNoticeYears 同类，
+      // 用于探针逐条取证时给每条详情页补齐正确年份并做精确跨年判定）。
+      const resolveYearFromNotice = (noticeTimeText: string): number => {
+        const m = (noticeTimeText || '').match(/(\d{1,2})-(\d{1,2})/);
+        const thisYear = new Date().getFullYear();
+        if (!m) return thisYear;
+        const d = new Date(thisYear, Number(m[1]) - 1, Number(m[2]));
+        return Math.abs(d.getTime() - Date.now()) > 300 * 86400000 ? thisYear - 1 : thisYear;
+      };
+      const noticeMonthDayOf = (noticeTimeText: string): number | undefined => {
+        const m = (noticeTimeText || '').match(/(\d{1,2})-(\d{1,2})/);
+        return m ? Number(m[1]) * 100 + Number(m[2]) : undefined;
+      };
+
       const isDetailFrame = /\/detail/.test(window.location.pathname);
 
       // 情形 A：当前帧本身已是详情页（诊断时若用户已点开某条通知，或对详情帧注入执行）。
       if (isDetailFrame) {
         const liveRaw = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-        const parsed = parseExam(liveRaw);
+        // 情形 A 无列表发送时间可锚定，按当前年补齐（跨年由 now-180d 回退兜底）。
+        const parsed = parseExam(liveRaw, new Date().getFullYear());
         let source = window.location.pathname;
         try {
           source = new URL(window.location.href).pathname;
@@ -551,30 +579,31 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
         };
       }
 
-      // 情形 B：列表页 —— 依次探测前 3 条“考试”消息（自建同源隐藏 iframe 读实时 DOM），
+      // 情形 B：列表页 —— 依次探测前 6 条“考试”消息（自建同源隐藏 iframe 读实时 DOM），
       // **优先回传解析失败（parsed=null）的那条**：看板上“未提供截止时间”的条目正来自
-      // 解析失败的详情页，它们才是需要取证的对象（旧探针只探首条，若首条恰好可解析会错过失败样本）。
-      // 全部可解析时回传首条。fetch 静态 HTML 仅作对照（预期 only 外壳）。
-      const examTargets: Element[] = [];
+      // 解析失败的详情页，它们才是需要取证的对象（此前只探首条，若前几条恰好可解析会错过失败样本）。
+      // 全部可解析时回传首条。每条按其列表发送时间锚定真实年份。fetch 静态 HTML 仅作对照。
+      const examTargets: { open: Element; noticeTime: string }[] = [];
       for (const li of Array.from(document.querySelectorAll('li.dataBody_item'))) {
         const t = (li.querySelector('.notice_title')?.textContent || '').trim();
         if (/^考试/.test(t)) {
           const open = li.querySelector('.openNotice[data-url]');
+          const noticeTime = (li.querySelector('.notice_time')?.textContent || '').replace(/\s+/g, ' ').trim();
           if (open) {
-            examTargets.push(open);
-            if (examTargets.length >= 3) break;
+            examTargets.push({ open, noticeTime });
+            if (examTargets.length >= 6) break;
           }
         }
       }
       if (!examTargets.length) {
         const only = document.querySelector('li.dataBody_item .openNotice[data-url]');
-        if (only) examTargets.push(only);
+        if (only) examTargets.push({ open: only, noticeTime: '' });
       }
       if (!examTargets.length) return null;
 
       const waitForRender = async (
         pred: () => boolean,
-        timeoutMs = 6000,
+        timeoutMs = 5000,
         intervalMs = 200,
       ): Promise<void> => {
         const start = Date.now();
@@ -619,8 +648,8 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
       };
 
       let result: DiagnosticExamProbe | null = null;
-      for (const target of examTargets) {
-        const rel = target.getAttribute('data-url') || '';
+      for (const { open, noticeTime } of examTargets) {
+        const rel = open.getAttribute('data-url') || '';
         if (!rel) continue;
         const abs = new URL(rel, window.location.href).toString();
         const source = (() => {
@@ -630,6 +659,8 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
             return rel;
           }
         })();
+        const year = resolveYearFromNotice(noticeTime);
+        const nmd = noticeMonthDayOf(noticeTime);
 
         // 对照：fetch 静态 HTML（预期 only 外壳）。
         let fetchStatus = 0;
@@ -651,7 +682,7 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
           liveRaw && !liveRaw.startsWith('live-error') && !liveRaw.startsWith('fetch-error')
             ? liveRaw
             : fetchRaw;
-        const parsed = parseExam(bestRaw);
+        const parsed = parseExam(bestRaw, year, nmd);
         const probe: DiagnosticExamProbe = {
           source,
           method,
