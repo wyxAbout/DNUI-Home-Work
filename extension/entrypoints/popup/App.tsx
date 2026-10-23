@@ -580,11 +580,12 @@ function App() {
 
             {report.examProbe && (
               <div className="finding-block">
-                <span className="finding-key">考试详情抓取探测（fetch 一条考试通知详情）</span>
+                <span className="finding-key">考试详情抓取探测（实时 DOM 取证）</span>
                 {report.examProbe.error ? (
                   <p className="finding-empty">探测失败：{report.examProbe.error}</p>
                 ) : report.examProbe.parsed ? (
                   <ul className="finding-list">
+                    <li key="method">取证手段：{report.examProbe.method}</li>
                     <li key="src"><code>GET</code> {report.examProbe.source} → {report.examProbe.status}</li>
                     <li key="course">课程：{report.examProbe.parsed.courseName || '（空）'}</li>
                     <li key="exam">考试：{report.examProbe.parsed.examTitle || '（空）'}</li>
@@ -593,7 +594,8 @@ function App() {
                   </ul>
                 ) : (
                   <p className="finding-empty">
-                    fetch 返回 {report.examProbe.status}，但未解析到考试字段（正文样本见诊断 JSON 的 examProbe.textSample）
+                    取证手段：{report.examProbe.method}；fetch 返回 {report.examProbe.status}，
+                    但实时 DOM 仍未解析到考试字段（正文样本见诊断 JSON 的 examProbe.textSample）
                   </p>
                 )}
               </div>

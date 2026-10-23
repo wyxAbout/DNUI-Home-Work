@@ -75,6 +75,10 @@ export interface DiagnosticAssignmentSummary {
 export interface DiagnosticExamProbe {
   // 被探测的详情路径（仅 pathname，去敏）。
   source: string;
+  // 取证手段：live-detail-frame（当前帧已是详情页，直接读已渲染 DOM）/
+  // injected-iframe（列表页自建同源隐藏 iframe 加载详情后读已渲染 DOM）/
+  // none（未能渲染出考试字段）/ exception（探测异常）。
+  method: string;
   ok: boolean;
   status: number;
   parsed: {
@@ -450,11 +454,67 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   };
 
   // 学习通考试详情抓取探测（自包含，注入后独立运行）：
-  // 取首个标题以“考试”开头的消息项的 openNotice[data-url]，fetch（同域带 cookie，
-  // 等价手动点开、不导航不进答题）后按 src/chaoxing.ts 同规则解析并回传证据。
+  // 关键取证点 —— 此前“fetch 一条考试通知详情”返回的是 SPA 外壳（仅工具栏 + 内联脚本，
+  // 不含考试字段），故 parsed 恒为 null。考试字段（课程名称/考试名称/开始/结束时间/考试形式）
+  // 由前端 JS 异步渲染进 DOM，必须读取“已渲染的实时 DOM”才能拿到。
+  // 本探针分两种情形取证：
+  //   情形 A（诊断时若已点开某条通知，或对详情帧注入）：当前帧 URL 含 /detail，
+  //            直接读取 document.body.innerText（已渲染）并解析。
+  //   情形 B（列表页）：自建一个同源隐藏 iframe 加载该详情（等价手动点开，但主页面不跳转、
+  //            也不会点到“考试”按钮误入答题），待其 JS 渲染后读取 contentDocument.body.innerText。
+  //            同时保留 fetch 静态 HTML 作为对照（预期 only 外壳）。
+  // 这样能确认“实时 DOM 是否含考试字段”，为正式解析器落地提供证据。
   const probeExamDetail = async (): Promise<DiagnosticExamProbe | null> => {
     try {
       if (!/(^|\.)chaoxing\.com$/.test(window.location.hostname)) return null;
+
+      const parseExam = (
+        raw: string,
+      ): { courseName: string; examTitle: string; startAt: string | null; endAt: string | null } | null => {
+        const flat = (raw || '').replace(/\s+/g, ' ').trim();
+        if (!flat) return null;
+        const grab = (label: string, stopLabels: string[]): string => {
+          const stops = stopLabels.map((s) => `(?=${s})`).join('|');
+          const m = flat.match(new RegExp(`${label}\\s*[：:]\\s*(.*?)\\s*(?:${stops}|$)`));
+          return (m?.[1] || '').trim();
+        };
+        const courseName = grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']);
+        const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
+        const startRaw = flat.match(/开始时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
+        const endRaw = flat.match(/结束时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
+        if (!examTitle && !endRaw) return null;
+        return {
+          courseName,
+          examTitle,
+          startAt: startRaw ? `${startRaw[1] ?? ''}T${startRaw[2] ?? ''}` : null,
+          endAt: endRaw ? `${endRaw[1] ?? ''}T${endRaw[2] ?? ''}` : null,
+        };
+      };
+
+      const isDetailFrame = /\/detail/.test(window.location.pathname);
+
+      // 情形 A：当前帧本身已是详情页（诊断时若用户已点开某条通知，或对详情帧注入执行）。
+      if (isDetailFrame) {
+        const liveRaw = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+        const parsed = parseExam(liveRaw);
+        let source = window.location.pathname;
+        try {
+          source = new URL(window.location.href).pathname;
+        } catch {
+          /* 保持 pathname */
+        }
+        return {
+          source,
+          method: 'live-detail-frame',
+          ok: true,
+          status: 200,
+          parsed,
+          textSample: redactLongTokens(liveRaw).slice(0, 1500),
+          error: null,
+        };
+      }
+
+      // 情形 B：列表页 —— 找首个“考试”消息，fetch 外壳做对照 + 自建隐藏 iframe 读实时 DOM。
       let target: Element | null = null;
       for (const li of Array.from(document.querySelectorAll('li.dataBody_item'))) {
         const t = (li.querySelector('.notice_title')?.textContent || '').trim();
@@ -467,52 +527,89 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
       const rel = target?.getAttribute('data-url') || '';
       if (!rel) return null;
       const abs = new URL(rel, window.location.href).toString();
-      let source = rel;
+      const source = (() => {
+        try {
+          return new URL(abs).pathname;
+        } catch {
+          return rel;
+        }
+      })();
+
+      // 对照：fetch 静态 HTML（预期 only 外壳）。
+      let fetchStatus = 0;
+      let fetchOk = false;
+      let fetchRaw = '';
       try {
-        source = new URL(abs).pathname;
-      } catch {
-        /* 保持 rel */
+        const res = await fetch(abs, { credentials: 'include' });
+        fetchStatus = res.status;
+        fetchOk = res.ok;
+        const html = res.ok ? await res.text() : '';
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        fetchRaw = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+      } catch (e) {
+        fetchRaw = 'fetch-error:' + String(e).slice(0, 120);
       }
-      const res = await fetch(abs, { credentials: 'include' });
-      const status = res.status;
-      const html = res.ok ? await res.text() : '';
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const raw = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-      // 内联解析（与 src/chaoxing.ts 的 parseChaoxingExamDetailText 同规则；
-      // textContent 相邻元素无空格拼接，停止点用零宽前瞻、日期与时刻间空白可选）。
-      const grab = (label: string, stopLabels: string[]): string => {
-        const stops = stopLabels.map((s) => `(?=${s})`).join('|');
-        const m = raw.match(new RegExp(`${label}\\s*[：:]\\s*(.*?)\\s*(?:${stops}|$)`));
-        return (m?.[1] || '').trim();
-      };
-      const grabTime = (label: string): string | null => {
-        const m = raw.match(
-          new RegExp(`${label}\\s*[：:]\\s*(\\d{4}-\\d{2}-\\d{2})\\s*(\\d{2}:\\d{2}(?::\\d{2})?)`),
-        );
-        return m ? `${m?.[1] || ''}T${m?.[2] || ''}` : null;
-      };
-      const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
-      const endAt = grabTime('结束时间');
-      const parsed =
-        examTitle || endAt
-          ? {
-              courseName: grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']),
-              examTitle,
-              startAt: grabTime('开始时间'),
-              endAt,
+
+      // 实测：自建同源隐藏 iframe 加载详情，读已渲染 DOM（主页面不跳转、不误点“考试”）。
+      let liveRaw = '';
+      let method: string = 'none';
+      try {
+        const waitForRender = async (
+          pred: () => boolean,
+          timeoutMs = 6000,
+          intervalMs = 200,
+        ): Promise<void> => {
+          const start = Date.now();
+          while (Date.now() - start < timeoutMs) {
+            let ok = false;
+            try {
+              ok = pred();
+            } catch {
+              ok = false;
             }
-          : null;
+            if (ok) return;
+            await wait(intervalMs);
+          }
+        };
+        const frame = document.createElement('iframe');
+        frame.style.display = 'none';
+        frame.src = abs;
+        document.body.appendChild(frame);
+        await waitForRender(() => {
+          const d = (frame as HTMLIFrameElement).contentDocument;
+          if (!d || !d.body) return false;
+          const txt = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
+          return /考试名称|结束时间|开始时间/.test(txt);
+        });
+        const d = (frame as HTMLIFrameElement).contentDocument;
+        if (d && d.body) {
+          liveRaw = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
+          method = 'injected-iframe';
+        }
+        frame.remove();
+      } catch (e) {
+        liveRaw = 'live-error:' + String(e).slice(0, 120);
+        method = 'exception';
+      }
+
+      const bestRaw =
+        liveRaw && !liveRaw.startsWith('live-error') && !liveRaw.startsWith('fetch-error')
+          ? liveRaw
+          : fetchRaw;
+      const parsed = parseExam(bestRaw);
       return {
         source,
-        ok: res.ok,
-        status,
+        method,
+        ok: fetchOk,
+        status: fetchStatus,
         parsed,
-        textSample: redactLongTokens(raw).slice(0, 800),
+        textSample: redactLongTokens(bestRaw).slice(0, 1500),
         error: null,
       };
     } catch (e) {
       return {
         source: '',
+        method: 'exception',
         ok: false,
         status: 0,
         parsed: null,
