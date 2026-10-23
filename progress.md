@@ -127,3 +127,19 @@
   - 同等级接线全部完成：`models.ts` 新增 `chaoxing` 平台（PlatformId/PLATFORM_IDS/PLATFORM_LABELS=学习通邮箱/PLATFORM_HOSTS=i.chaoxing.com），并把 `createEmptyStore`/`loadHomeworkStore` 改为按 `PLATFORM_IDS` 遍历（避免漏接）；新增 `extension/src/chaoxing.ts` 占位解析器（仅认 i.chaoxing.com 域、返回 `needs-verification` 且不覆盖缓存，与东软/iTEST/批改网占位行为一致，文件头注明待实现纯函数签名）；`platforms.ts` 注册适配器；`content.ts` 与 `wxt.config.ts` 各自加入 `https://i.chaoxing.com/*`；`storage.ts` 归一化覆盖 `chaoxing`；`popup/App.tsx` 文案（空态/诊断错误/注入失败提示）纳入学习通邮箱；`diagnose.ts` 的主动点击关键词由仅"作业"扩展为含"收件箱/消息/未读/待办"，使诊断能主动进入收件箱取证。
   - 验证：`npm run compile` 零错误；`npm test` 28/28 通过（既有东软/iTEST/批改网/模型单测未受影响）；`npm run build` 成功（content.js 17.30→17.73 kB），构建产物 manifest 的 `host_permissions` 与 `content_scripts.matches` 均含 `https://i.chaoxing.com/*`，确认接线已进发布包（D 盘 `.output/chrome-mv3`）。
   - 下一步（对应"测试"环节）：用户在 Edge 重载扩展 → 登录 i.chaoxing.com 打开消息中心收件箱 → 点看板"诊断当前页面" → 把去敏摘要（hostname/mainText/requests/tree/tabs）贴回。据此确认收件箱真实结构、"还需要做的任务"的判定方式后，落地 `chaoxing.ts` 真实解析并补 `chaoxing.test.ts`（即"生成最终结果"）。
+
+- 2026-10-23（中午）：**学习通诊断首轮取证 + 发现 iframe 结构，修正诊断穿透 iframe**。
+  - 用户回传首轮诊断：hostname=i.chaoxing.com（正确），但 `mainText=""`、`requests=[]` 皆为**空**——关键证据：右侧内容区 `#mainright` 是一个 `<iframe>`，其 `src="https://notice.chaoxing.com/pc/notice/myNotice?s=<token>"`。**即：学习通"收件箱"真实内容渲染在 `notice.chaoxing.com` 的跨域 iframe 里，顶层文档看不到内容**，左菜单"收件箱"项（id=first521830，class 含 active/cur）的未读角标为 `<i>0</i>`。
+  - 修正：① `wxt.config.ts` 的 `host_permissions` 新增 `https://notice.chaoxing.com/*`（征得 scripting 注入 iframe 权限）；② `popup/App.tsx` 的 `runDiagnostic` 改用 `target:{tabId, allFrames:true}`，并聚合多框架结果、优先取 hostname 含 `notice.chaoxing.com` 的框架（收件箱真实内容所在）。诊断说明文案同步改为"当前标签页及其内嵌 iframe"。
+  - 验证：`npm run compile` 零错误；`npm run build` 成功，manifest `host_permissions` 已含 `i.chaoxing.com` 与 `notice.chaoxing.com` 两条。
+  - 待用户（测试环节第二轮）：重载扩展 → 登录 i.chaoxing.com 打开个人空间、"收件箱"已默认激活 → 等 iframe 加载完（约 2 秒）→ 点"诊断当前页面"。本轮诊断应能在 `notice.chaoxing.com` 框架抓到收件箱 `mainText`/`requests`/`tree`。据此再定"还有需要做的任务"判定规则，落地真实解析。
+
+- 2026-10-23（下午）：**学习通邮箱真实解析器已落地（基于第二轮 iframe 诊断证据）**。
+  - 证据（notice.chaoxing.com 收件箱 iframe，title=收件箱）：每条消息 = `li.dataBody_item[data-id=GUID]`，内含 `.notice_unread > .notice_title`（标题）、`.notice_time`（MM-DD(星期X) HH:MM）、`.receiverName`（发件人，均"学习通知"）、`.openNotice[data-url=/pc/notice/$CACG$<uuid>/detail?sendTag=0]`（详情深链）、`.redDot`（未读标记）。真实 mainText 全为"考试通知"/"作业:《课程》…"/"作业结束提醒"，发件人学习通知。
+  - 判定规则（不猜）：标题以"作业"开头且不含"结束提醒" → 计入待办；"作业结束提醒"与"考试通知"等排除。收件箱只下发通知、无提交状态，故统一标 `status=unsubmitted`、`dueAt=null`（看板显示"未提交/未提供截止时间"，不触发"自动隐藏已过期"）；课程名从《》抽取，无则回退"学习通作业通知"，按 slugifyCourse 归属。
+  - 架构：解析器在 iframe 上下文（notice.chaoxing.com）执行；顶层 i.chaoxing.com 直接返回 null（不覆盖 iframe 已写入缓存）。`models.ts` 的 `PLATFORM_HOSTS.chaoxing` 加 `notice.chaoxing.com`；`content.ts` matches 加 `https://notice.chaoxing.com/*`；`wxt.config.ts` host_permissions 已含该域。
+  - `chaoxing.ts` 落地：纯函数 `classifyChaoxingTitle`/`extractChaoxingCourse`/`mapChaoxingAssignments`（可单测）+ DOM 胶水 `readRawItems`/`extractChaoxingAssignments`（用诊断证据中的稳定 class，不猜未出现字段）；replaceAll 整组替换缓存，列表为空/无作业通知时清空旧条目。
+  - 新增 `chaoxing.test.ts`（5 例，真实标题样本：分类、课程抽取、字段映射、DOM 层过滤排除结束提醒/考试通知、无书名号回退）。
+  - 验证：`npm run compile` 零错误；`npm test` 33/33（新增 5）；`npm run build` 成功，manifest `content_scripts.matches` 与 `host_permissions` 均含 i.chaoxing.com 与 notice.chaoxing.com。
+  - 需求文档已同步（第 2/6/12/14 节：学习通从"待验证"移入"已实现"，写明判定规则与 iframe 结构）。
+  - 已知限制：① 收件箱分页（"点击加载更多"）仅取首屏，未自动翻页；② 顶层 i.chaoxing.com 点"刷新当前平台"只能触发顶层（跨域读不到 iframe），实际依赖 iframe 加载时自动上报；③ 不解析未读之外的提交状态，历史作业也会列出（如需"仅未读/仅近期"可后续加过滤）。

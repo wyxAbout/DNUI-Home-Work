@@ -71,7 +71,7 @@ export const PLATFORM_HOSTS: Record<PlatformId, string[]> = {
   neusoft: ['study.neusoft.edu.cn'],
   pigai: ['pigai.org', 'www.pigai.org'],
   itest: ['sso.unipus.cn', 'itestcloud.unipus.cn'],
-  chaoxing: ['i.chaoxing.com'],
+  chaoxing: ['i.chaoxing.com', 'notice.chaoxing.com'],
 };
 
 export function createEmptyStore(): HomeworkStore {

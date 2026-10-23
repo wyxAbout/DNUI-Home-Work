@@ -20,6 +20,7 @@ export default defineContentScript({
     'https://itestcloud.unipus.cn/*',
     'https://*.unipus.cn/*',
     'https://i.chaoxing.com/*',
+    'https://notice.chaoxing.com/*',
   ],
   runAt: 'document_idle',
   main() {

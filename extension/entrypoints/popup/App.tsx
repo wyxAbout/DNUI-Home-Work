@@ -331,17 +331,31 @@ function App() {
         return;
       }
       // 直接把自包含扫描函数注入当前标签页执行，不依赖页面是否已注入过 content script。
+      // allFrames: true —— 学习通收件箱渲染在 notice.chaoxing.com 的跨域 iframe 中，
+      // 顶层文档看不到内容，必须注入到 iframe 框架本身才能抓到真实消息列表。
       const results = await browser.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: tab.id, allFrames: true },
         func: collectPageDiagnostic,
       });
-      const report = results?.[0]?.result as DiagnosticReport | undefined;
-      if (!report) {
+      const reports = (results ?? [])
+        .map((r) => r.result as DiagnosticReport | undefined)
+        .filter((r): r is DiagnosticReport => Boolean(r));
+      if (reports.length === 0) {
         setDiagnosticError('未能读取页面结构：请确认当前标签页是东软/批改网/iTEST/学习通邮箱 的页面。');
         setReport(null);
         void appendLog('warn', 'diagnostic', '诊断：页面未返回结构，可能不是平台页面');
         return;
       }
+      // 优先采用 notice.chaoxing.com 框架（收件箱真实内容所在）；否则回退到“有文本/首个”框架。
+      const report =
+        reports.find((r) => r.hostname.includes('notice.chaoxing.com')) ??
+        reports.find((r) => r.mainText) ??
+        reports[0]!;
+      void appendLog(
+        'info',
+        'diagnostic',
+        `诊断：捕获 ${reports.length} 个框架${reports.length > 1 ? `，已优先采用 ${report.hostname} 的内容` : ''}`,
+      );
       setReport(report);
       setDiagnostic(JSON.stringify(report, null, 2));
       void appendLog(
@@ -604,7 +618,7 @@ function App() {
           </div>
         )}
         <p className="diagnostic-note">
-          诊断仅读取当前标签页的 DOM 结构，已去除表单值、Cookie、token 等敏感信息，不会上传任何数据。用于定位作业页面结构。
+          诊断仅读取当前标签页及其内嵌 iframe 的 DOM 结构，已去除表单值、Cookie、token 等敏感信息，不会上传任何数据。用于定位作业页面结构。
         </p>
           </div>
         )}
