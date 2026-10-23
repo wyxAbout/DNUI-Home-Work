@@ -176,3 +176,18 @@ export function countCoveredCourses(store: HomeworkStore): number {
   }
   return ids.size;
 }
+
+// 是否已过期：仅当存在有效截止时间且早于当前时刻才视为过期。
+// 无截止时间（dueAt 为 null）或无法解析的时间一律按“未过期”处理，
+// 避免把没有截止时间的作业误隐藏。dueAt 为本地时间 ISO（无时区后缀），
+// new Date() 按本机时区解析，与 Date.now() 比较即可，无需时区换算。
+export function isAssignmentExpired(dueAt: string | null): boolean {
+  if (!dueAt) {
+    return false;
+  }
+  const t = new Date(dueAt).getTime();
+  if (Number.isNaN(t)) {
+    return false;
+  }
+  return t < Date.now();
+}

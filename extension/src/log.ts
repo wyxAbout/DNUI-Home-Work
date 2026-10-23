@@ -2,7 +2,7 @@
 // 不记录任何作业内容、凭据或个人信息，只记录事件级信息。
 
 export type LogLevel = 'info' | 'warn' | 'error';
-export type LogSource = 'system' | 'sync' | 'diagnostic' | 'page';
+export type LogSource = 'system' | 'sync' | 'diagnostic' | 'page' | 'display';
 
 export interface LogEntry {
   ts: string; // ISO 时间

@@ -7,6 +7,7 @@ import {
   mergeAssignmentsByCourse,
   dedupeAssignments,
   countCoveredCourses,
+  isAssignmentExpired,
   type Assignment,
 } from './models.ts';
 
@@ -130,4 +131,21 @@ test('跨平台与跨课程：countCoveredCourses 统计唯一组合', () => {
   store.platforms.pigai.assignments = [mk('pigai:X:01', 'X', '批改网课X')];
 
   assert.equal(countCoveredCourses(store), 3);
+});
+
+test('isAssignmentExpired：无截止时间或无法解析的均视为未过期', () => {
+  assert.equal(isAssignmentExpired(null), false);
+  assert.equal(isAssignmentExpired(''), false);
+  assert.equal(isAssignmentExpired('不是时间'), false);
+  assert.equal(isAssignmentExpired('2026-13-99 99:99'), false);
+});
+
+test('isAssignmentExpired：明显早于此刻的截止时间视为已过期', () => {
+  assert.equal(isAssignmentExpired('2000-01-01T00:00:00'), true);
+  assert.equal(isAssignmentExpired('2020-06-15T23:59:59'), true);
+});
+
+test('isAssignmentExpired：明显晚于此刻的截止时间视为未过期', () => {
+  assert.equal(isAssignmentExpired('2099-12-31T23:59:59'), false);
+  assert.equal(isAssignmentExpired('2999-01-01T00:00:00'), false);
 });

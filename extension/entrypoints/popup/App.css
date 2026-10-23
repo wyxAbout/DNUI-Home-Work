@@ -145,6 +145,89 @@ h1 {
   color: #518172;
 }
 
+/* 显示选项：自动隐藏已过期项（小型开关） */
+.display-options {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px solid #e1e6e3;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 12px;
+  border: 1px solid #dfe5e1;
+  border-radius: 6px;
+  color: #45615a;
+  background: #ffffff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.toggle:hover {
+  border-color: #88aaa0;
+  background: #f0f5f2;
+}
+
+.toggle.on {
+  color: #265c4e;
+  border-color: #b6cec5;
+  background: #e8f0ec;
+}
+
+.toggle-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 18px;
+  border-radius: 999px;
+  background: #cdd5d1;
+  transition: background 0.15s ease;
+}
+
+.toggle.on .toggle-switch {
+  background: #4e927a;
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.toggle.on .toggle-knob {
+  transform: translateX(18px);
+}
+
+.hidden-hint {
+  color: #b07d2b;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.empty-note {
+  max-width: 390px;
+  margin-top: 8px;
+  color: #b07d2b;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
 .platform-status {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -106,3 +106,18 @@
   - 验证：`npm run compile` 零错误；`npm test` 25/25 通过（东软 14 + iTEST 5 + 批改网 5）；`npm run build` 成功（content.js 15.27→17.30 kB，产物在 D 盘 `.output/chrome-mv3/`）。
   - 需求文档已同步更新（第 1 节实现状态、第 12 节待验证项、第 14 节当前实现）将批改网从"待验证占位"改为"已实现"。
   - 待用户执行：扩展管理页**重载扩展** → 打开批改网学生端"我的作文"（默认即"未完成"）或点看板"刷新当前平台" → 确认看板出现"批改网"分组及 3 项未完成（含已过期项排在最前）。若平台换用分页或状态文案变化，按"未知即不计入"的既有保护再据新证据修正则。
+
+- 用户拍板：为批改网样本里那条已过期近一年的"未完成"作业（B1U2，截止 2025-11-10）**增加"自动隐藏已过期项"开关**（小型切换按钮）。实施为**全局显示偏好**（不限平台，因三个平台 Assignment 都带 dueAt），纯渲染层过滤，绝不动缓存。
+  - `models.ts`：新增纯函数 `isAssignmentExpired(dueAt)`——仅当存在有效截止时间且早于当前时刻才判过期；`dueAt` 为 null 或无法解析一律视为未过期（避免无截止时间作业被误隐藏）；`dueAt` 是本地时间 ISO，`new Date()` 按本机时区解析即可与 `Date.now()` 比较，无需时区换算。
+  - `storage.ts`：新增 `loadHideExpired()` / `saveHideExpired()`（`browser.storage.local` 键 `hide-expired`，默认 false），与既有 homework-store 读写范式一致。
+  - `log.ts`：`LogSource` 新增 `'display'`，使开关动作可记入运行日志。
+  - `popup/App.tsx`：
+    - 新增 `hideExpired` 状态，挂载时 `loadHideExpired()` 读入；切换时 `setHideExpired` + `saveHideExpired` + 写一条 `'display'` 日志。
+    - 渲染列表 `assignments` 的记忆块改为：先按平台筛选、再按 `hideExpired` 过滤（调用 `isAssignmentExpired` 排除过期项）、最后排序；`groups` 与所有计数都基于"可见集合"。
+    - 计数一致性：汇总条"未完成 X 项"、平台筛选按钮徽标、全部徽标全部改用**可见数**（`visibleCount` / `visibleByPlatform`）；新增 `totalCount`/`visibleCount`/`hiddenCount`，开启且确有隐藏项时显示"已隐藏 N 项过期作业"提示。
+    - 空态增强：当 `visibleCount===0 && hiddenCount>0` 时，明确提示"全部 N 项均未过截止时间，已被隐藏，关闭开关即可恢复"——避免用户误以为"真的没有待办"。
+    - 新增"显示选项"区（在平台筛选行下方）放置该开关，样式为 teal 主题的小型 pill 切换。
+  - `popup/App.css`：新增 `.display-options`/`.toggle`/`.toggle-switch`/`.toggle-knob`/`.hidden-hint`/`.empty-note` 样式（与现有 teal/绿配色一致）。
+  - `models.test.ts`：新增 3 例 `isAssignmentExpired` 单测（null/非法→未过期；明显过去→过期；明显未来→未过期）。
+  - 验证：`npm run compile` 零错误；`npm test` 28/28 通过（东软 14 + iTEST 5 + 批改网 5 + 新增 3 + 原有 models 3）；`npm run build` 成功（**content.js 仍 17.30 kB**——开关是纯展示层、解析器未改动，符合预期；popup chunk 与 CSS 体积因新 UI 略增）。
+  - 设计取舍：隐藏是"显示偏好"而非"删除数据"——过期但平台仍标未提交的作业仍留在 `homework-store` 缓存里，关掉开关立即恢复显示；不会因前端发版或用户改主意而丢失。

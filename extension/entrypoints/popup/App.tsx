@@ -3,13 +3,14 @@ import './App.css';
 import {
   countCoveredCourses,
   getAllAssignments,
+  isAssignmentExpired,
   PLATFORM_IDS,
   PLATFORM_LABELS,
   type Assignment,
   type HomeworkStore,
   type PlatformId,
 } from '@/src/models';
-import { loadHomeworkStore } from '@/src/storage';
+import { loadHomeworkStore, loadHideExpired, saveHideExpired } from '@/src/storage';
 import { collectPageDiagnostic, type DiagnosticReport } from '@/src/diagnose';
 import { loadLog, clearLog, appendLog, type LogEntry } from '@/src/log';
 import { BUILD_ID } from '@/src/build';
@@ -141,6 +142,8 @@ function App() {
   const [store, setStore] = useState<HomeworkStore | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // 显示偏好：开启后隐藏“截止时间已过期”的未提交作业（不动缓存）。默认关闭。
+  const [hideExpired, setHideExpired] = useState(false);
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
@@ -162,6 +165,7 @@ function App() {
   useEffect(() => {
     void refreshStore();
     void refreshLog();
+    void loadHideExpired().then(setHideExpired);
 
     const listener = (changes: Record<string, unknown>) => {
       if (changes['homework-store']) void refreshStore();
@@ -172,22 +176,43 @@ function App() {
     return () => browser.storage.onChanged.removeListener(listener);
   }, []);
 
+  // 渲染用作业列表：先按平台筛选，再按“隐藏已过期”偏好过滤；排序与分组均基于可见集合。
   const assignments = useMemo(() => {
     if (!store) {
       return [];
     }
 
-    const filtered =
+    const scoped =
       filter === 'all'
         ? getAllAssignments(store)
         : store.platforms[filter].assignments;
 
-    return sortAssignments(filtered);
-  }, [filter, store]);
+    const visible = hideExpired
+      ? scoped.filter((a) => !isAssignmentExpired(a.dueAt))
+      : scoped;
+
+    return sortAssignments(visible);
+  }, [filter, store, hideExpired]);
 
   const groups = useMemo(() => groupAssignments(assignments), [assignments]);
 
-  const activeCount = store ? getAllAssignments(store).length : 0;
+  // 缓存中的未提交总数（含过期项）；可见数 = 实际展示数；隐藏数 = 因过期被隐藏的数。
+  const totalCount = store ? getAllAssignments(store).length : 0;
+  const visibleCount = assignments.length;
+  const hiddenCount = totalCount - visibleCount;
+
+  // 各平台“可见数”，用于平台筛选按钮的计数徽标，保证徽标与下方列表一致。
+  const visibleByPlatform = useMemo(() => {
+    const map = {} as Record<PlatformId, number>;
+    for (const id of PLATFORM_IDS) {
+      const scoped = store?.platforms[id].assignments ?? [];
+      map[id] = hideExpired
+        ? scoped.filter((a) => !isAssignmentExpired(a.dueAt)).length
+        : scoped.length;
+    }
+    return map;
+  }, [store, hideExpired]);
+
   const courseCount = store ? countCoveredCourses(store) : 0;
 
   // 等待后台把新数据写回（解析含 SPA 渲染等待，不能发完消息就立刻读缓存）。
@@ -367,7 +392,7 @@ function App() {
       <section className="summary-strip" aria-label="作业摘要">
         <div>
           <span className="summary-label">未完成</span>
-          <strong>{activeCount}</strong>
+          <strong>{visibleCount}</strong>
           <span className="summary-suffix">项</span>
         </div>
         <div className="summary-meta">
@@ -384,7 +409,7 @@ function App() {
           onClick={() => setFilter('all')}
         >
           全部
-          <span>{activeCount}</span>
+          <span>{visibleCount}</span>
         </button>
         {PLATFORM_IDS.map((platformId) => (
           <button
@@ -394,10 +419,38 @@ function App() {
             key={platformId}
           >
             {PLATFORM_LABELS[platformId]}
-            <span>{store.platforms[platformId].assignments.length}</span>
+            <span>{visibleByPlatform[platformId]}</span>
           </button>
         ))}
       </nav>
+
+      <section className="display-options" aria-label="显示选项">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={hideExpired}
+          className={`toggle ${hideExpired ? 'on' : ''}`}
+          onClick={async () => {
+            const next = !hideExpired;
+            setHideExpired(next);
+            await saveHideExpired(next);
+            void appendLog(
+              'info',
+              'display',
+              next ? '已开启：自动隐藏已过期项' : '已关闭：显示全部未提交项',
+            );
+          }}
+          title="开启后，截止时间已过的作业将从看板隐藏（仍保留在缓存中，关闭即恢复显示）"
+        >
+          <span className="toggle-text">自动隐藏已过期项</span>
+          <span className="toggle-switch" aria-hidden="true">
+            <span className="toggle-knob" />
+          </span>
+        </button>
+        {hideExpired && hiddenCount > 0 && (
+          <span className="hidden-hint">已隐藏 {hiddenCount} 项过期作业</span>
+        )}
+      </section>
 
       <section className="platform-status" aria-label="平台同步状态">
         {PLATFORM_IDS.map((platformId) => {
@@ -586,11 +639,19 @@ function App() {
             </div>
           ))
         ) : (
-          <div className="empty-state">
-            <div className="empty-icon">✓</div>
-            <h2>当前没有已同步的未提交作业</h2>
-            <p>访问并登录东软智慧教育、批改网或 iTEST 后，插件会更新对应平台。</p>
-            {/* 空看板必须能自解释：区分“真的没有待办”和“同步没成功/待验证”。 */}
+            <div className="empty-state">
+              <div className="empty-icon">✓</div>
+              <h2>当前没有已同步的未提交作业</h2>
+              <p>访问并登录东软智慧教育、批改网或 iTEST 后，插件会更新对应平台。</p>
+              {/* 开了“自动隐藏已过期项”且未提交项全部过期时，需明确告知，
+                  否则用户会误以为“真的没有待办”，其实是被隐藏了。 */}
+              {visibleCount === 0 && hiddenCount > 0 && (
+                <p className="empty-note">
+                  全部 {hiddenCount} 项未提交作业均已过截止时间，已被「自动隐藏已过期项」隐藏。
+                  关闭上方开关即可重新显示。
+                </p>
+              )}
+              {/* 空看板必须能自解释：区分“真的没有待办”和“同步没成功/待验证”。 */}
             <ul className="empty-platforms">
               {PLATFORM_IDS.map((platformId) => {
                 const platform = store.platforms[platformId];

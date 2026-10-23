@@ -7,6 +7,7 @@ import {
 } from './models';
 
 const STORE_KEY = 'homework-store';
+const HIDE_EXPIRED_KEY = 'hide-expired';
 
 // 兼容旧缓存：早期数据没有 courseId / courseName 字段，按作业 id 前缀（neusoft:<courseId>:<index>）回填，
 // 避免 UI 读到 undefined。新版同步写入后会自然补齐这两个字段。
@@ -80,4 +81,15 @@ export async function updatePlatformSnapshot(
 
   await saveHomeworkStore(next);
   return next;
+}
+
+// 显示偏好：“自动隐藏已过期项”。默认关闭（false）。
+// 该开关只影响看板渲染（隐藏 dueAt 已过去的作业），不改动缓存中的未提交作业。
+export async function loadHideExpired(): Promise<boolean> {
+  const result = await browser.storage.local.get(HIDE_EXPIRED_KEY);
+  return result[HIDE_EXPIRED_KEY] === true;
+}
+
+export async function saveHideExpired(value: boolean): Promise<void> {
+  await browser.storage.local.set({ [HIDE_EXPIRED_KEY]: value });
 }
