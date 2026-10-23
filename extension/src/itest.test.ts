@@ -77,7 +77,7 @@ test('未提交集合 = pending + absent，与“待完成”汇总一致', () =
   assert.equal(nonDone.length, pendingCount);
 });
 
-test('映射到 Assignment：仅 pending（仍可作答）进入未完成，absent 被排除', () => {
+test('映射到 Assignment：pending 与 absent 都进入未完成，absent 标记为 expired', () => {
   const { items } = parseItestExamPageText(SAMPLE);
   const assignments = mapItestAssignments(items, {
     courseId: '25级软工_数据科学B2班',
@@ -87,23 +87,27 @@ test('映射到 Assignment：仅 pending（仍可作答）进入未完成，abse
   });
 
   // 真实样本里 B2U6 为可作答的 pending，B2U5 已缺考（absent）。
-  // 用户要求“已过期的不出现在未完成里”，故只应有 1 项。
-  assert.equal(assignments.length, 1);
-  const a0 = assignments.find((a) => a.id === 'itest:1000107669');
-  assert.ok(a0);
-  assert.equal(a0?.platformId, 'itest');
-  assert.equal(a0?.courseId, '25级软工_数据科学B2班');
-  assert.equal(a0?.courseName, '25级软工、数据科学B2班');
-  assert.equal(a0?.title, '26-27-1大学英语I（三）单元作业-新标准B2U6');
-  assert.equal(a0?.dueAt, '2026-11-16T23:55:00');
-  assert.equal(a0?.status, 'unsubmitted');
-  assert.equal(a0?.source, 'home');
-  assert.equal(a0?.url, 'https://itestcloud.unipus.cn/utest/itest/s/exam');
-  // 已缺考的 B2U5 不应出现在未完成列表里。
-  assert.equal(assignments.find((a) => a.id === 'itest:1000106858'), undefined);
+  // 用户要求“已过期任务重新显现”，故两项都应出现，且缺考项标记为 expired。
+  assert.equal(assignments.length, 2);
+  const aPending = assignments.find((a) => a.id === 'itest:1000107669');
+  assert.ok(aPending);
+  assert.equal(aPending?.platformId, 'itest');
+  assert.equal(aPending?.courseId, '25级软工_数据科学B2班');
+  assert.equal(aPending?.courseName, '25级软工、数据科学B2班');
+  assert.equal(aPending?.title, '26-27-1大学英语I（三）单元作业-新标准B2U6');
+  assert.equal(aPending?.dueAt, '2026-11-16T23:55:00');
+  assert.equal(aPending?.status, 'unsubmitted');
+  assert.equal(aPending?.source, 'home');
+  assert.equal(aPending?.url, 'https://itestcloud.unipus.cn/utest/itest/s/exam');
+
+  const aExpired = assignments.find((a) => a.id === 'itest:1000106858');
+  assert.ok(aExpired);
+  assert.equal(aExpired?.title, '26-27-1大学英语I（三）单元作业-新标准B2U5');
+  assert.equal(aExpired?.dueAt, '2026-10-19T23:55:00');
+  assert.equal(aExpired?.status, 'expired');
 });
 
-test('absent（已错过截止时间）项被排除，不计入未完成', () => {
+test('absent（已错过截止时间）项进入未完成并标记为 expired', () => {
   const items: ParsedItestItem[] = [
     { examId: '1', title: '仍可作答', type: null, tag: null, dueAt: null, status: 'pending' },
     { examId: '2', title: '已错过', type: null, tag: null, dueAt: null, status: 'absent' },
@@ -114,8 +118,9 @@ test('absent（已错过截止时间）项被排除，不计入未完成', () =>
     url: 'https://itestcloud.unipus.cn/utest/itest/s/exam',
     syncedAt: '2026-10-22T00:00:00.000Z',
   });
-  assert.equal(assignments.length, 1);
-  assert.equal(assignments[0]?.id, 'itest:1');
+  assert.equal(assignments.length, 2);
+  assert.equal(assignments[0]?.status, 'unsubmitted');
+  assert.equal(assignments[1]?.status, 'expired');
 });
 
 test('仍可作答项（pending）无 examId 时回退到标题 slug 作为稳定 ID', () => {
@@ -130,4 +135,5 @@ test('仍可作答项（pending）无 examId 时回退到标题 slug 作为稳�
   });
   assert.equal(assignments.length, 1);
   assert.equal(assignments[0]?.id, 'itest:某单元测试');
+  assert.equal(assignments[0]?.status, 'unsubmitted');
 });

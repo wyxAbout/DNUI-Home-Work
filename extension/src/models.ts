@@ -16,7 +16,9 @@ export interface Assignment {
   title: string;
   dueAt: string | null;
   url: string;
-  status: 'unsubmitted';
+  // 'unsubmitted' = 平台明确标记未提交、且仍可作答；
+  // 'expired'     = 平台仍计入“待完成”但已错过截止（如 iTEST 缺考），看板以“已过期”区分展示。
+  status: 'unsubmitted' | 'expired';
   syncedAt: string;
   // 数据来源：
   // - 'home'   来自首页“我的学习任务”（跨课程的全局待办视图，自带截止时间）；

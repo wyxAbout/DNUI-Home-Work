@@ -328,6 +328,25 @@ h1 {
   background: #fbfdfc;
 }
 
+/* 已错过截止（iTEST 缺考等）：仍保留在“未完成”列表，但用暖灰与“仍可作答”区分。 */
+.assignment-row.is-expired {
+  border-color: #e7d8d0;
+  background: #fbf5f2;
+}
+
+.assignment-row.is-expired .assignment-mark {
+  background: #b58d7c;
+}
+
+.assignment-row.is-expired .assignment-content strong {
+  color: #9b8a82;
+}
+
+.assignment-row.is-expired:hover {
+  border-color: #d8b9aa;
+  background: #f8efe9;
+}
+
 .assignment-mark {
   width: 8px;
   height: 8px;

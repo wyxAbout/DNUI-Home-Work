@@ -622,7 +622,7 @@ function App() {
               </div>
               {group.assignments.map((assignment) => (
                 <a
-                  className="assignment-row"
+                  className={`assignment-row${assignment.status === 'expired' ? ' is-expired' : ''}`}
                   href={assignment.url}
                   target="_blank"
                   rel="noreferrer"
@@ -631,7 +631,10 @@ function App() {
                   <span className="assignment-mark" />
                   <span className="assignment-content">
                     <strong>{assignment.title}</strong>
-                    <span>{PLATFORM_LABELS[assignment.platformId]} · 未提交</span>
+                    <span>
+                      {PLATFORM_LABELS[assignment.platformId]} ·{' '}
+                      {assignment.status === 'expired' ? '已过期' : '未提交'}
+                    </span>
                   </span>
                   <span className="assignment-due">{formatDate(assignment.dueAt)}</span>
                 </a>
