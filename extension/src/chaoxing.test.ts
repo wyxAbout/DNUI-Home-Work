@@ -11,8 +11,40 @@ import {
   normalizeChaoxingExamTime,
   parseChaoxingExamDetailText,
   resolveChaoxingNoticeYears,
+  findNextPageButton,
   type RawChaoxingItem,
 } from './chaoxing.ts';
+
+// ===== 收件箱翻页：分页控件检测（反馈：学习通此前只读第一页）=====
+// 轻量假 Document：仅实现 findNextPageButton 用到的 querySelectorAll + 元素属性。
+function fakeBtn(text: string, className = '', disabled = false): Element {
+  return {
+    textContent: text,
+    className,
+    disabled,
+    querySelectorAll: () => [],
+  } as unknown as Element;
+}
+function fakeDoc(containerChildren: Element[]): Document {
+  const containerSel = '.el-pagination, .pagination, .page';
+  return {
+    querySelectorAll: (sel: string) =>
+      sel === containerSel ? [fakeBtn('', 'el-pagination', false) as unknown as Element] : [],
+  } as unknown as Document;
+}
+// 让“分页条”元素在被查询子元素时返回给定 children。
+function fakeDocWithPager(children: Element[]): Document {
+  const pager = {
+    textContent: '',
+    className: 'el-pagination',
+    disabled: false,
+    querySelectorAll: (sel: string) => (sel === 'button, a, li, span' ? children : []),
+  } as unknown as Element;
+  return {
+    querySelectorAll: (sel: string) =>
+      sel === '.el-pagination, .pagination, .page' ? [pager] : [],
+  } as unknown as Document;
+}
 
 // 真实诊断样本中的标题（来自 notice.chaoxing.com 收件箱 mainText）。
 const T_LINEAR = '作业:《线性代数》作业指导手册矩阵的运算43。44页拍照上传';
@@ -352,4 +384,26 @@ test('无《》标题时回退到默认课程名，仍正确归属学习通作�
   assert.equal(assignments.length, 1);
   assert.equal(assignments[0]!.courseName, '学习通作业通知');
   assert.equal(assignments[0]!.courseId, '学习通作业通知');
+});
+
+test('findNextPageButton：分页条内存在可点击“下一页”时返回该按钮', () => {
+  const doc = fakeDocWithPager([fakeBtn('上一页'), fakeBtn('下一页')]);
+  const btn = findNextPageButton(doc);
+  assert.ok(btn);
+  assert.equal((btn as Element as { textContent: string }).textContent, '下一页');
+});
+
+test('findNextPageButton：末页“下一页”被禁用时返回 null（已到末页）', () => {
+  const doc = fakeDocWithPager([fakeBtn('下一页', 'is-disabled', true)]);
+  assert.equal(findNextPageButton(doc), null);
+});
+
+test('findNextPageButton：分页条内无“下一页”文本时返回 null', () => {
+  const doc = fakeDocWithPager([fakeBtn('上一页'), fakeBtn('1'), fakeBtn('2')]);
+  assert.equal(findNextPageButton(doc), null);
+});
+
+test('findNextPageButton：分页条容器缺失时返回 null（单页，不翻页）', () => {
+  const doc = fakeDoc([]);
+  assert.equal(findNextPageButton(doc), null);
 });

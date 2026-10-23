@@ -1,8 +1,8 @@
 {
-  "name": "wxt-react-starter",
-  "description": "manifest.json description",
-  "private": true,
-  "version": "0.0.0",
+  "name": "assignment-integration-dashboard",
+  "description": "作业整合看板：把多个教学平台明确标记为「未提交」的作业汇总到同一看板的浏览器扩展",
+  "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "wxt",

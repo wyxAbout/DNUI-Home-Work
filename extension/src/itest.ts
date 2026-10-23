@@ -25,6 +25,10 @@
 
 import type { Assignment, PlatformExtractionResult } from './models';
 import { slugifyCourse } from './neusoft.ts';
+import { PLATFORM_SELECTOR_CONFIG } from './selectors.ts';
+
+// 选择器集中配置（反馈 2.3：抽成配置，避免学校改版时逐个翻解析器）。
+const itestCfg = PLATFORM_SELECTOR_CONFIG.itest;
 
 interface ItestExtractOptions {
   // 是否允许主动交互（语义同 neusoft.ts / platforms.ts）：
@@ -174,7 +178,7 @@ function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs: number
 
 // 从“我的班级”区块提取班级名（best-effort，作为看板分组维度；缺失则回退 'iTEST'）。
 function extractClassName(doc: Document): string | null {
-  const el = doc.querySelector('[class*="stuClsInfo"]');
+  const el = doc.querySelector(itestCfg.fields.classInfo!);
   const t = (el?.textContent || '').replace(/\s+/g, ' ').trim();
   if (t && t.length <= 60) return t;
   return null;

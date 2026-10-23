@@ -16,6 +16,10 @@
 //   绝不覆盖上次成功的缓存。
 
 import type { Assignment, PlatformExtractionResult } from './models';
+import { PLATFORM_SELECTOR_CONFIG } from './selectors.ts';
+
+// 选择器集中配置（反馈 2.3：抽成配置，避免学校改版时逐个翻解析器）。
+const neusoftCfg = PLATFORM_SELECTOR_CONFIG.neusoft;
 
 interface NeusoftExtractOptions {
   // 是否允许主动点击“作业”标签。
@@ -187,7 +191,7 @@ function findAssignmentTab(doc: Document): HTMLElement | null {
   };
 
   // 1) 优先标准标签选择器，避免全量遍历大 DOM。
-  for (const sel of ['.el-tabs__item', '.ant-tabs-tab', '[role="tab"]']) {
+  for (const sel of neusoftCfg.fields.assignmentTab!.split(',').map((s) => s.trim())) {
     for (const el of Array.from(doc.querySelectorAll(sel))) {
       if (isAssignmentTab(el)) return el as HTMLElement;
     }
@@ -248,13 +252,7 @@ function deriveCourseId(url: string): string {
 // 从课程页提取可读课程名（best-effort，绝不影响解析主流程）：
 // 优先内容区主标题，回退页面标题剥离站点后缀，再回退 courseId。
 function extractCourseName(doc: Document, fallback: string): string {
-  const headingSelectors = [
-    '.v-content-wrap h1',
-    '.v-content-wrap h2',
-    '.course-title',
-    '.course-header .title',
-    'h1',
-  ];
+  const headingSelectors = neusoftCfg.fields.courseTitle!.split(',').map((s) => s.trim());
   for (const sel of headingSelectors) {
     const el = doc.querySelector(sel);
     const text = (el?.textContent || '').replace(/\s+/g, ' ').trim();
@@ -274,7 +272,7 @@ function extractCourseName(doc: Document, fallback: string): string {
 // 注意：不能直接用 `.my-task`——它同时包住“我的考试”等其它区块，
 // 后者自带 `.noData` 空态，会让“学习任务为空”的判定误命中（2026-10-22 实测踩坑）。
 export function findHomeTaskBlock(doc: Document): HTMLElement | null {
-  const nodes = Array.from(doc.querySelectorAll('span, div, h2, h3, h4'));
+  const nodes = Array.from(doc.querySelectorAll(neusoftCfg.fields.homeTaskBlock!));
   for (const el of nodes) {
     const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
     // 标题可能带后缀（如“我的学习任务（3）”），故用前缀匹配 + 长度上限。
@@ -297,7 +295,7 @@ export function findHomeTaskBlock(doc: Document): HTMLElement | null {
 
 // 空态标记：Element UI / 平台自定义的空状态组件。
 function hasEmptyMarker(el: HTMLElement): boolean {
-  return !!el.querySelector('.el-empty, .neu-empty, .no-data-content, .noData, .data-empty');
+  return !!el.querySelector(neusoftCfg.fields.emptyMarker!);
 }
 
 // 首页“我的学习任务”空态判定：只看该区块内部，DOM 空状态组件优先，回退文本关键词。
@@ -322,9 +320,9 @@ export async function extractNeusoftAssignments(
   const getContentEl = (): HTMLElement | null => {
     // 课程详情页用 .v-content-wrap；首页“我的学习任务”用 .my-task（回退 .v-layout-content / body）。
     const el =
-      doc.querySelector('.v-content-wrap') ??
-      doc.querySelector('.my-task') ??
-      doc.querySelector('.v-layout-content') ??
+      doc.querySelector(neusoftCfg.fields.contentWrap!) ??
+      doc.querySelector(neusoftCfg.fields.myTask!) ??
+      doc.querySelector(neusoftCfg.fields.layoutContent!) ??
       doc.body;
     return (el as HTMLElement | null) ?? null;
   };

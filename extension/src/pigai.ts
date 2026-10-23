@@ -27,6 +27,10 @@
 
 import type { Assignment, PlatformExtractionResult } from './models';
 import { slugifyCourse } from './neusoft.ts';
+import { PLATFORM_SELECTOR_CONFIG } from './selectors.ts';
+
+// 选择器集中配置（反馈 2.3：抽成配置，避免学校改版时逐个翻解析器）。
+const pigaiCfg = PLATFORM_SELECTOR_CONFIG.pigai;
 
 interface PigaiExtractOptions {
   // 语义同 neusoft.ts / itest.ts：
@@ -127,7 +131,7 @@ function waitFor(predicate: () => boolean, timeoutMs: number, intervalMs: number
 
 // 判断当前激活的状态标签：'unsubmitted'=未完成（取数） / 'submitted'=已完成（跳过） / null=未识别。
 function findActiveStatusTab(doc: Document): 'unsubmitted' | 'submitted' | null {
-  const tabs = Array.from(doc.querySelectorAll('li.showST'));
+  const tabs = Array.from(doc.querySelectorAll(pigaiCfg.fields.statusTab!));
   if (tabs.length === 0) {
     return null;
   }
@@ -147,9 +151,9 @@ function findActiveStatusTab(doc: Document): 'unsubmitted' | 'submitted' | null 
 // 从 DOM 取每条作业的真实深链（text 解析拿不到 href），以作业号为键关联。
 function collectPigaiDetailUrls(doc: Document): Map<string, string> {
   const map = new Map<string, string>();
-  for (const row of Array.from(doc.querySelectorAll('ul.reItemS'))) {
+  for (const row of Array.from(doc.querySelectorAll(pigaiCfg.fields.row!))) {
     const num = (row.querySelector('li')?.textContent ?? '').trim();
-    const link = row.querySelector('li.stu_title a') as HTMLAnchorElement | null;
+    const link = row.querySelector(pigaiCfg.fields.titleLink!) as HTMLAnchorElement | null;
     if (num && link?.href) {
       map.set(num, link.href);
     }
@@ -180,19 +184,19 @@ export async function extractPigaiAssignments(
 
   // 等待作业列表渲染（传统 PHP 服务端渲染，通常即时；仍做有界等待以防 document_idle 偏早）。
   const listReady = (): boolean =>
-    !!doc.querySelector('#essayList') ||
+    !!doc.querySelector(pigaiCfg.fields.listHeader!) ||
     /作业号\s*作业标题\s*类型\s*出题人\s*指定班级\s*截止时间/.test(readPageText(doc));
   if (!listReady()) {
     await waitFor(listReady, options.allowAutoOpen ? 4000 : 2500, 200);
   }
 
   const text = readPageText(doc);
-  const hasList = !!doc.querySelector('#essayList') || /作业号\s*作业标题/.test(text);
+  const hasList = !!doc.querySelector(pigaiCfg.fields.listHeader!) || /作业号\s*作业标题/.test(text);
 
   if (!hasList) {
     // 不在作业列表页：已登录（如首页，页头有用户链接）则静默跳过保留缓存；
     // 未登录（无用户链接）则提示登录，避免把登录页误判为“0 条作业”。
-    const loggedIn = !!doc.querySelector('#pigai_nickname') || /退出/.test(text);
+    const loggedIn = !!doc.querySelector(pigaiCfg.fields.nickname!) || /退出/.test(text);
     if (loggedIn) {
       return null;
     }

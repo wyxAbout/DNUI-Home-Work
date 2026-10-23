@@ -59,6 +59,10 @@
 
 import type { Assignment, PlatformExtractionResult } from './models';
 import { slugifyCourse } from './neusoft.ts';
+import { PLATFORM_SELECTOR_CONFIG, SelectorError } from './selectors.ts';
+
+// 选择器集中配置（反馈 2.3：抽成配置，避免学校改版时逐个翻解析器）。
+const chaoxingCfg = PLATFORM_SELECTOR_CONFIG.chaoxing;
 
 interface ChaoxingExtractOptions {
   // 语义同 neusoft.ts / itest.ts / pigai.ts：
@@ -340,22 +344,96 @@ async function mapWithConcurrency<T, R>(
 // openNotice[data-url] / li[data-id]），不猜任何未出现在证据里的字段。
 function readRawItems(doc: Document): RawChaoxingItem[] {
   const out: RawChaoxingItem[] = [];
-  for (const li of Array.from(doc.querySelectorAll('li.dataBody_item'))) {
-    const id = li.getAttribute('data-id')?.trim() ?? '';
-    const title = (li.querySelector('.notice_title')?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    const sender = (li.querySelector('.receiverName')?.textContent ?? '').trim();
-    const openEl = li.querySelector('.openNotice');
-    const rel = openEl?.getAttribute('data-url')?.trim() ?? '';
+  const itemSel = chaoxingCfg.item ?? 'li.dataBody_item';
+  const titleSel = chaoxingCfg.fields.title!;
+  const senderSel = chaoxingCfg.fields.sender!;
+  const detailSel = chaoxingCfg.fields.detailUrl!;
+  const detailAttr = chaoxingCfg.fields.detailUrlAttr!;
+  const timeSel = chaoxingCfg.fields.time!;
+  const idAttr = chaoxingCfg.fields.itemIdAttr!;
+  for (const li of Array.from(doc.querySelectorAll(itemSel))) {
+    const id = li.getAttribute(idAttr)?.trim() ?? '';
+    const title = (li.querySelector(titleSel)?.textContent ?? '').replace(/\s+/g, ' ').trim();
+    const sender = (li.querySelector(senderSel)?.textContent ?? '').trim();
+    const openEl = li.querySelector(detailSel);
+    const rel = openEl?.getAttribute(detailAttr)?.trim() ?? '';
     if (!id || !title || !rel) {
       continue;
     }
     const detailUrl = /^https?:\/\//i.test(rel)
       ? rel
       : `https://notice.chaoxing.com${rel}`;
-    const noticeTime = (li.querySelector('.notice_time')?.textContent ?? '').replace(/\s+/g, ' ').trim() || undefined;
+    const noticeTime = (li.querySelector(timeSel)?.textContent ?? '').replace(/\s+/g, ' ').trim() || undefined;
     out.push({ id, title, sender, detailUrl, noticeTime });
   }
   return out;
+}
+
+// ============ 收件箱翻页（反馈：学习通此前只读第一页） ============
+// 在收件箱 iframe 内点击“下一页”并累加各页消息；以 data-id 去重防止重复计数。
+// 只点击列表分页的“下一页”（绝不点“考试/交卷”按钮，符合既有铁律），并受 MAX_CHAOXING_PAGES
+// 上限与“翻页无新增即停止”双重保护，避免死循环；分页控件缺失时只处理当前页。
+
+const MAX_CHAOXING_PAGES = 20;
+
+// 在分页条内定位“下一页”按钮：文本命中配置 nextTexts 且未被禁用（末页）。
+// 仅在本模块内用于翻页；导出便于单测覆盖“末页/禁用/无匹配”等判定。
+export function findNextPageButton(doc: Document): HTMLElement | null {
+  const containerSel = chaoxingCfg.pagination?.container;
+  const nextTexts = chaoxingCfg.pagination?.nextTexts ?? [];
+  if (!containerSel || nextTexts.length === 0) return null;
+  for (const root of Array.from(doc.querySelectorAll(containerSel))) {
+    for (const el of Array.from(root.querySelectorAll('button, a, li, span'))) {
+      const text = (el.textContent || '').replace(/\s+/g, '').trim();
+      if (!nextTexts.includes(text)) continue;
+      const cls = typeof el.className === 'string' ? el.className : '';
+      if (/disabled|is-disabled|btn-disabled/.test(cls)) continue;
+      if ((el as HTMLButtonElement).disabled === true) continue;
+      return el as HTMLElement;
+    }
+  }
+  return null;
+}
+
+// 逐页累加收件箱消息；返回按 data-id 去重后的全部条目（跨页不重复计数）。
+async function collectAllPages(
+  doc: Document,
+  firstPage: RawChaoxingItem[],
+): Promise<RawChaoxingItem[]> {
+  const seen = new Map<string, RawChaoxingItem>();
+  for (const it of firstPage) seen.set(it.id, it);
+  const itemSel = chaoxingCfg.item ?? 'li.dataBody_item';
+  const idAttr = chaoxingCfg.fields.itemIdAttr!;
+
+  for (let page = 1; page < MAX_CHAOXING_PAGES; page += 1) {
+    const nextBtn = findNextPageButton(doc);
+    if (!nextBtn) break; // 无“下一页”= 末页
+    const prevIds = new Set(seen.keys());
+    try {
+      nextBtn.click();
+    } catch {
+      break; // 点击失败则停止，不强行翻页
+    }
+    // 等列表刷新：要求出现“新的非空 data-id 集合”，避免把加载中（空列表）误判为已刷新。
+    const rerendered = (): boolean => {
+      const ids = Array.from(doc.querySelectorAll(itemSel))
+        .map((li) => li.getAttribute(idAttr)?.trim() ?? '')
+        .filter(Boolean);
+      return ids.length > 0 && ids.some((id) => !prevIds.has(id));
+    };
+    await waitFor(rerendered, 6000, 200);
+    if (!rerendered()) break; // 翻页无响应，停止
+    const pageItems = readRawItems(doc);
+    let added = 0;
+    for (const it of pageItems) {
+      if (!seen.has(it.id)) {
+        seen.set(it.id, it);
+        added += 1;
+      }
+    }
+    if (added === 0) break; // 无新增 = 已到末页或内容重复，停止
+  }
+  return [...seen.values()];
 }
 
 // 从收件箱列表的“发送时间”为每条通知锚定真实年份（彻底解决跨年无年份歧义）。
@@ -475,20 +553,41 @@ export async function extractChaoxingAssignments(
 
   // 以下在 notice.chaoxing.com 收件箱 iframe 上下文执行。
   // 等列表渲染（document_idle 通常已就绪，仍做有界等待以防偏早）。
-  const ready = (): boolean => doc.querySelectorAll('li.dataBody_item').length > 0;
+  const ready = (): boolean =>
+    doc.querySelectorAll(chaoxingCfg.item ?? 'li.dataBody_item').length > 0;
   if (!ready()) {
     await waitFor(ready, options.allowAutoOpen ? 4000 : 2500, 200);
   }
+  // 有界等待后仍无列表容器：明确报错（needs-verification），绝不静默清空缓存（反馈 2.3）。
+  if (!ready()) {
+    throw new SelectorError(
+      'chaoxing',
+      chaoxingCfg.item ?? 'li.dataBody_item',
+      '收件箱列表未渲染（可能网络慢或平台已改版）',
+    );
+  }
 
   const raw = readRawItems(doc);
-  const homeworkItems = raw.filter((it) => classifyChaoxingTitle(it.title) === 'homework');
-  const examItems = raw.filter((it) => classifyChaoxingTitle(it.title) === 'exam');
+  // 容器在、但读不到任何条目：字段选择器可能已失效，同样显式报错，不静默清空。
+  if (raw.length === 0) {
+    throw new SelectorError(
+      'chaoxing',
+      `${chaoxingCfg.fields.title}, ${chaoxingCfg.fields.detailUrl}[${chaoxingCfg.fields.detailUrlAttr}]`,
+      '列表已渲染但读不到消息条目（字段选择器可能已失效）',
+    );
+  }
+
+  // 翻页：收件箱可能有多页，逐页累加（反馈：学习通此前只读第一页）。
+  const allRaw = await collectAllPages(doc, raw);
+
+  const homeworkItems = allRaw.filter((it) => classifyChaoxingTitle(it.title) === 'homework');
+  const examItems = allRaw.filter((it) => classifyChaoxingTitle(it.title) === 'exam');
 
   const syncedAt = new Date().toISOString();
   const nowMs = Date.now();
   // 跨年消歧：用列表发送时间（倒序 + notice_time）给每条通知锚定真实年份，
   // 作为该通知详情页无年份“考试时间：MM-DD”的补齐基准。
-  const years = resolveChaoxingNoticeYears(raw, nowMs);
+  const years = resolveChaoxingNoticeYears(allRaw, nowMs);
   const detailYear = new Date(nowMs).getFullYear();
 
   // 考试通知：逐条读取详情页“已渲染 DOM”解析“课程/考试名/开始/结束时间”（“注意时间”判定）。

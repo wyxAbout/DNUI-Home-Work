@@ -1,6 +1,7 @@
 import {
   getAllAssignments,
   mergeAssignmentsByCourse,
+  PLATFORM_HOSTS,
   PLATFORM_LABELS,
   type HomeworkStore,
   type PlatformId,
@@ -26,6 +27,53 @@ interface PlatformPageReadyMessage {
 
 const NOTIFICATION_ID = 'homework-summary';
 
+// 判断某 host 是否属于任一已接入平台（含子域）。
+function hostMatchesPlatform(host: string): boolean {
+  return (Object.values(PLATFORM_HOSTS) as string[][]).some((hosts) =>
+    hosts.some((h) => host === h || host.endsWith(`.${h}`)),
+  );
+}
+
+// 浏览器启动时，对后台已打开的平台标签页主动触发一次同步。
+// 受限于扩展读不到未打开页面的 DOM，此机制只覆盖「已打开」的标签；
+// 从未打开过的平台仍需用户访问一次（见 README「已知限制」）。
+async function resyncOpenPlatformTabs(): Promise<void> {
+  // 本地结构化类型：仅取本函数用到的字段，避免依赖浏览器全局 Tab 类型
+  // （该工程内 browser.tabs.query 的返回类型未被正确推断为 Tab[]）。
+  type TabsQueryResult = Array<{ id?: number; url?: string; pendingUrl?: string }>;
+  let tabs: TabsQueryResult = [];
+  try {
+    tabs = (await browser.tabs.query({})) as unknown as TabsQueryResult;
+  } catch {
+    return;
+  }
+  let triggered = 0;
+  for (const tab of tabs) {
+    const url = tab.url ?? tab.pendingUrl;
+    if (!url) {
+      continue;
+    }
+    let host: string;
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      continue;
+    }
+    if (!hostMatchesPlatform(host) || tab.id == null) {
+      continue;
+    }
+    try {
+      await browser.tabs.sendMessage(tab.id, { type: 'SYNC_ACTIVE_PAGE' });
+      triggered += 1;
+    } catch {
+      // 该标签尚未注入 content script（如刚恢复、尚未加载完成），跳过。
+    }
+  }
+  if (triggered > 0) {
+    void appendLog('info', 'sync', `浏览器启动：已对 ${triggered} 个已打开平台标签页触发同步`);
+  }
+}
+
 async function notifyFromCache(): Promise<void> {
   const store = await loadHomeworkStore();
   const assignments = getAllAssignments(store);
@@ -44,6 +92,8 @@ async function notifyFromCache(): Promise<void> {
 
 export default defineBackground(() => {
   browser.runtime.onStartup.addListener(() => {
+    // 先对已打开的平台标签页触发一次同步，再弹出汇总通知（通知内容基于最近一次缓存）。
+    void resyncOpenPlatformTabs();
     void notifyFromCache();
   });
 
