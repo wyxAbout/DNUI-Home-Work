@@ -2,11 +2,12 @@
 // 真实实现，基于 2026-10-23 两次去敏诊断证据（先取证、再落地，不猜结构/接口/状态文案）。
 //
 // 证据关键结论：
-// 1) 入口 i.chaoxing.com 个人空间左菜单“收件箱”（id=first521830，class 含 active/cur）激活后，
-//    右侧内容区 #mainright 是一个 <iframe>，src 指向 https://notice.chaoxing.com/pc/notice/myNotice，
-//    真实消息列表渲染在该 iframe 内。顶层 i.chaoxing.com 文档读不到 iframe 内容（跨域），
-//    故解析器在 iframe 上下文（notice.chaoxing.com）中执行；顶层 i.chaoxing.com 直接返回 null，
-//    不覆盖 iframe 已写入的缓存。
+// 1) 用户真实入口为 https://i.chaoxing.com/base?t=... （“收件箱”），该页内嵌一个 <iframe>，
+//    src 指向 https://notice.chaoxing.com/pc/notice/myNotice，真实消息列表渲染在该 iframe 内。
+//    顶层 i.chaoxing.com 文档读不到 iframe 内容（跨域），故解析器在 iframe 上下文
+//    （notice.chaoxing.com）中执行；顶层 i.chaoxing.com 直接返回 null，不覆盖 iframe 已写入的缓存。
+//    2026-10-23 诊断证实：content.ts 必须开启 allFrames:true，否则自动 content script 不会注入
+//    该 iframe，导致看板长期显示“未访问”（诊断工具因显式 allFrames 才成功取证）。
 // 2) 真实结构（来自 notice.chaoxing.com 诊断的 tree）：
 //    每条消息 = <li class="dataBody_td dataBody_item" data-id="<GUID>">
 //                <div class="dataBody_file"><span class="redDot"></span></div>   // redDot = 未读
@@ -37,6 +38,16 @@
 //      取证手段（关键修复）：此前 fetch 详情页只拿到 SPA 静态外壳（无考试字段，parsed 恒 null），
 //      故改用隐藏同源 iframe 加载详情、读取“已渲染的实时 DOM”再解析 —— 已用诊断验证
 //      method=injected-iframe 且 parsed 真实有效（课程名/考试名/起止时间齐全）。
+//   1b. 第二种详情格式（2026-10-23 看板截图证据，如“【64】概率论第1章单元测试”）：
+//       部分考试通知详情不含“开始时间/结束时间”标签，而是
+//       “考试时间： MM-DD HH:MM 至 MM-DD HH:MM”（无年份，其后可能附“考试时长： N分钟”）。
+//       解析规则：考试名称在“考试时间/考试时长”标签前截断（否则会吞掉整段时间文本）；
+//       “考试时间”区间两端归一为 startAt/endAt。缺省年份“就近补齐 + 跨年前翻”：
+//       先按调用方年份补齐；若补齐后的结束时间早于 now-180 天（典型：12 月发 1 月考，
+//       按当前年补会落进遥远的过去），判为跨年通知、起止时间整体 +1 年。
+//       残余局限（如实记录）：补齐后已落后超过 180 天的陈旧过期通知会被翻到下一年——
+//       但收件箱按时间倒序、首屏几乎不含如此陈旧的通知，且平台侧详情不带年份、
+//       单条数据本身无法彻底消除歧义，只能用“通知面向近期考试”这一事实做启发式。
 //   2. 交卷成功（自动化不可行，已用证据坐实，须如实记录）：
 //      用户规则“点击‘考试’后若显示‘交卷成功（提交方式：学生交卷）’则判定作业结束”。
 //      但 2026-10-23 的诊断证实：收件箱“通知详情”页只渲染“课程名称/考试名称/起止时间/考试形式”
@@ -106,11 +117,24 @@ export function normalizeChaoxingExamTime(raw: string): string | null {
 }
 
 // 纯函数：从考试通知详情页正文中解析结构化字段。
-// 证据 = 用户截图（详情页按行渲染“课程名称：/考试名称：/开始时间：/结束时间：/考试形式：”）。
+// 证据一（2026-10-23 截图）：详情页按行渲染“课程名称：/考试名称：/开始时间：/结束时间：/考试形式：”。
+// 证据二（2026-10-23 看板截图）：另一批通知用“考试时间： MM-DD HH:MM 至 MM-DD HH:MM
+// （考试时长： N分钟）”，无“开始/结束时间”标签、无年份 —— 见头部规则 1b。
 // 关键：DOMParser 的 textContent 会把相邻块级元素无空格拼接（“大学物理考试名称：…”，
 // 2026-10-23 首次抓取失败即此因），故字段停止点用零宽前瞻（不要求空白）、日期与时刻间空白可选。
-// 既无“考试名称”也无“结束时间”→ 视为不是考试详情页，返回 null。
-export function parseChaoxingExamDetailText(text: string): ChaoxingExamDetail | null {
+// 既无“考试名称”也无任何可解析的时间 → 视为不是考试详情页，返回 null。
+export interface ParseChaoxingExamDetailOptions {
+  // 格式 2（“考试时间：MM-DD HH:MM 至 MM-DD HH:MM”）不带年份，用该年份补齐；
+  // 缺省取“当前年份”（调用方传同步时刻对应的年份）。
+  year?: number;
+  // “就近补年”的基准时刻（缺省取当前时刻）；单测传入固定值以消除对真实时钟的依赖。
+  nowMs?: number;
+}
+
+export function parseChaoxingExamDetailText(
+  text: string,
+  options?: ParseChaoxingExamDetailOptions,
+): ChaoxingExamDetail | null {
   const flat = (text ?? '').replace(/\s+/g, ' ').trim();
   if (!flat) return null;
   const grab = (label: string, stopLabels: string[]): string => {
@@ -119,18 +143,72 @@ export function parseChaoxingExamDetailText(text: string): ChaoxingExamDetail | 
     const m = flat.match(re);
     return (m?.[1] ?? '').trim();
   };
-  const courseName = grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']);
-  const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
+  // “考试时间/考试时长”同样是字段标签：格式 2 里它们紧跟考试名称，不截断会把
+  // 整段时间文本吞进考试名称（2026-10-23 看板截图证据）。
+  const courseName = grab('课程名称', [
+    '考试名称',
+    '考试时间',
+    '考试时长',
+    '开始时间',
+    '结束时间',
+    '考试形式',
+  ]);
+  const examTitle = grab('考试名称', [
+    '考试时间',
+    '考试时长',
+    '开始时间',
+    '结束时间',
+    '考试形式',
+  ]);
   const startRaw = flat.match(/开始时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
   const endRaw = flat.match(/结束时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
-  if (!examTitle && !endRaw) {
+  // 格式 2：考试时间： MM-DD HH:MM 至 MM-DD HH:MM（年份可有可无，空白可有可无）。
+  const rangeRaw = flat.match(
+    /考试时间\s*[：:]\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)\s*至\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/,
+  );
+  if (!examTitle && !endRaw && !rangeRaw) {
     return null;
   }
+  // 格式 2 的时间归一：无年份的 MM-DD 按调用方年份（缺省当前年）补齐；
+  // 若补齐后的结束时间早于 now-180 天，判为跨年通知、起止时间整体 +1 年（“就近补年”启发式，见头部 1b）。
+  const baseYear = options?.year ?? new Date().getFullYear();
+  const nowMs = options?.nowMs ?? Date.now();
+  const YEARLESS_ROLL_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
+  const yearless = (date: string | undefined): boolean => !!date && /^\d{2}-\d{2}$/.test(date);
+  const withYear = (date: string, hm: string, yearOffset = 0): string | null => {
+    if (!/^\d{2}-\d{2}$/.test(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    const full = /^\d{4}-/.test(date) ? date : `${baseYear + yearOffset}-${date}`;
+    return normalizeChaoxingExamTime(`${full} ${hm}`);
+  };
+  // 把本地 ISO 的年份 +n（月日时刻不变），用于跨年整体翻年。
+  const shiftYear = (iso: string, n: number): string | null => {
+    const m = iso.match(/^(\d{4})-(\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)$/);
+    return m ? `${Number(m[1]) + n}-${m[2] ?? ''}` : null;
+  };
+  const resolveRange = (): { startAt: string | null; endAt: string | null } => {
+    const startAt = withYear(rangeRaw?.[1] ?? '', rangeRaw?.[2] ?? '');
+    const endAt = withYear(rangeRaw?.[3] ?? '', rangeRaw?.[4] ?? '');
+    // 仅对“无年份”的结束时间做跨年前翻；带年份的日期本身无歧义。
+    if (endAt && yearless(rangeRaw?.[3])) {
+      const endT = new Date(endAt).getTime();
+      if (!Number.isNaN(endT) && nowMs - endT > YEARLESS_ROLL_THRESHOLD_MS) {
+        const startAt2 = startAt ? shiftYear(startAt, 1) : null;
+        const endAt2 = shiftYear(endAt, 1);
+        if (endAt2) return { startAt: startAt2, endAt: endAt2 };
+      }
+    }
+    return { startAt, endAt };
+  };
+  const range = rangeRaw ? resolveRange() : null;
   return {
     courseName,
     examTitle,
-    startAt: startRaw ? normalizeChaoxingExamTime(`${startRaw[1] ?? ''} ${startRaw[2] ?? ''}`) : null,
-    endAt: endRaw ? normalizeChaoxingExamTime(`${endRaw[1] ?? ''} ${endRaw[2] ?? ''}`) : null,
+    startAt: startRaw
+      ? normalizeChaoxingExamTime(`${startRaw[1] ?? ''} ${startRaw[2] ?? ''}`)
+      : (range?.startAt ?? null),
+    endAt: endRaw
+      ? normalizeChaoxingExamTime(`${endRaw[1] ?? ''} ${endRaw[2] ?? ''}`)
+      : (range?.endAt ?? null),
   };
 }
 
@@ -265,8 +343,8 @@ async function readNoticeDetailText(doc: Document, url: string): Promise<string 
       if (!d || !d.body) return '';
       return (d.body.innerText || '').replace(/\s+/g, ' ').trim();
     };
-    // 有界等待渲染：最多 6s、200ms 轮询，直到正文出现考试字段。
-    await waitFor(() => /考试名称|结束时间|开始时间/.test(readRendered()), 6000, 200);
+    // 有界等待渲染：最多 6s、200ms 轮询，直到正文出现考试字段（含格式 2 的“考试时间”）。
+    await waitFor(() => /考试名称|考试时间|开始时间|结束时间/.test(readRendered()), 6000, 200);
     const text = readRendered();
     return text || null;
   } catch {
@@ -319,6 +397,8 @@ export async function extractChaoxingAssignments(
 
   const syncedAt = new Date().toISOString();
   const nowMs = Date.now();
+  // 格式 2 详情（“考试时间：MM-DD HH:MM 至 …”）无年份，按同步时刻所在年份补齐（见头部规则 1b）。
+  const detailYear = new Date(nowMs).getFullYear();
 
   // 考试通知：逐条读取详情页“已渲染 DOM”解析“课程/考试名/开始/结束时间”（“注意时间”判定）。
   // 列表页与详情页同域 notice.chaoxing.com，自建隐藏 iframe 等价于手动点开“通知”
@@ -326,7 +406,7 @@ export async function extractChaoxingAssignments(
   const examDetails: (ChaoxingExamDetail | null)[] = await Promise.all(
     examItems.map((item) =>
       readNoticeDetailText(doc, item.detailUrl).then((text) =>
-        text ? parseChaoxingExamDetailText(text) : null,
+        text ? parseChaoxingExamDetailText(text, { year: detailYear, nowMs }) : null,
       ),
     ),
   );

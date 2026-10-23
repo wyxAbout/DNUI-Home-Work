@@ -478,16 +478,53 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
           const m = flat.match(new RegExp(`${label}\\s*[：:]\\s*(.*?)\\s*(?:${stops}|$)`));
           return (m?.[1] || '').trim();
         };
-        const courseName = grab('课程名称', ['考试名称', '开始时间', '结束时间', '考试形式']);
-        const examTitle = grab('考试名称', ['开始时间', '结束时间', '考试形式']);
+        const courseName = grab('课程名称', ['考试名称', '考试时间', '考试时长', '开始时间', '结束时间', '考试形式']);
+        const examTitle = grab('考试名称', ['考试时间', '考试时长', '开始时间', '结束时间', '考试形式']);
         const startRaw = flat.match(/开始时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
         const endRaw = flat.match(/结束时间\s*[：:]\s*(\d{4}-\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/);
-        if (!examTitle && !endRaw) return null;
+        // 格式 2（2026-10-23 看板截图证据）：考试时间： MM-DD HH:MM 至 MM-DD HH:MM（无年份）。
+        const rangeRaw = flat.match(
+          /考试时间\s*[：:]\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)\s*至\s*((?:\d{4}-)?\d{2}-\d{2})\s*(\d{2}:\d{2}(?::\d{2})?)/,
+        );
+        if (!examTitle && !endRaw && !rangeRaw) return null;
+        // 无年份的 MM-DD 按“当前年份”补齐；补齐后早于 now-180 天判为跨年通知、整体 +1 年
+        // （与 chaoxing.ts 规则 1b 的“就近补年”启发式一致）。
+        const year = new Date().getFullYear();
+        const nowMs = Date.now();
+        const YEARLESS_ROLL_THRESHOLD_MS = 180 * 24 * 60 * 60 * 1000;
+        const yearless = (d: string | undefined): boolean => !!d && /^\d{2}-\d{2}$/.test(d);
+        const rangeIso = (date: string | undefined, hm: string | undefined, offset = 0): string | null => {
+          if (!date || !hm) return null;
+          if (!/^\d{2}-\d{2}$/.test(date) && !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+          return `${/^\d{4}-/.test(date) ? date : `${year + offset}-${date}`}T${hm}`;
+        };
+        const shiftYear = (iso: string, n: number): string | null => {
+          const m = iso.match(/^(\d{4})-(\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)$/);
+          return m ? `${Number(m[1]) + n}-${m[2] ?? ''}` : null;
+        };
+        let startAt = startRaw
+          ? `${startRaw[1] ?? ''}T${startRaw[2] ?? ''}`
+          : rangeIso(rangeRaw?.[1], rangeRaw?.[2]);
+        let endAt = endRaw
+          ? `${endRaw[1] ?? ''}T${endRaw[2] ?? ''}`
+          : rangeIso(rangeRaw?.[3], rangeRaw?.[4]);
+        // 仅对“无年份”的结束时间做跨年前翻；带年份的日期本身无歧义。
+        if (!endRaw && endAt && yearless(rangeRaw?.[3])) {
+          const endT = new Date(endAt).getTime();
+          if (!Number.isNaN(endT) && nowMs - endT > YEARLESS_ROLL_THRESHOLD_MS) {
+            const startAt2 = startAt ? shiftYear(startAt, 1) : null;
+            const endAt2 = shiftYear(endAt, 1);
+            if (endAt2) {
+              startAt = startAt2;
+              endAt = endAt2;
+            }
+          }
+        }
         return {
           courseName,
           examTitle,
-          startAt: startRaw ? `${startRaw[1] ?? ''}T${startRaw[2] ?? ''}` : null,
-          endAt: endRaw ? `${endRaw[1] ?? ''}T${endRaw[2] ?? ''}` : null,
+          startAt,
+          endAt,
         };
       };
 
@@ -514,98 +551,123 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
         };
       }
 
-      // 情形 B：列表页 —— 找首个“考试”消息，fetch 外壳做对照 + 自建隐藏 iframe 读实时 DOM。
-      let target: Element | null = null;
+      // 情形 B：列表页 —— 依次探测前 3 条“考试”消息（自建同源隐藏 iframe 读实时 DOM），
+      // **优先回传解析失败（parsed=null）的那条**：看板上“未提供截止时间”的条目正来自
+      // 解析失败的详情页，它们才是需要取证的对象（旧探针只探首条，若首条恰好可解析会错过失败样本）。
+      // 全部可解析时回传首条。fetch 静态 HTML 仅作对照（预期 only 外壳）。
+      const examTargets: Element[] = [];
       for (const li of Array.from(document.querySelectorAll('li.dataBody_item'))) {
         const t = (li.querySelector('.notice_title')?.textContent || '').trim();
         if (/^考试/.test(t)) {
-          target = li.querySelector('.openNotice[data-url]');
+          const open = li.querySelector('.openNotice[data-url]');
+          if (open) {
+            examTargets.push(open);
+            if (examTargets.length >= 3) break;
+          }
+        }
+      }
+      if (!examTargets.length) {
+        const only = document.querySelector('li.dataBody_item .openNotice[data-url]');
+        if (only) examTargets.push(only);
+      }
+      if (!examTargets.length) return null;
+
+      const waitForRender = async (
+        pred: () => boolean,
+        timeoutMs = 6000,
+        intervalMs = 200,
+      ): Promise<void> => {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          let ok = false;
+          try {
+            ok = pred();
+          } catch {
+            ok = false;
+          }
+          if (ok) return;
+          await wait(intervalMs);
+        }
+      };
+
+      // 单条取证：fetch 外壳对照 + 自建隐藏 iframe 读已渲染 DOM（主页面不跳转、不误点“考试”）。
+      const probeOne = async (absUrl: string): Promise<{ liveRaw: string; method: string }> => {
+        let liveRaw = '';
+        let method = 'none';
+        try {
+          const frame = document.createElement('iframe');
+          frame.style.display = 'none';
+          frame.src = absUrl;
+          document.body.appendChild(frame);
+          await waitForRender(() => {
+            const d = (frame as HTMLIFrameElement).contentDocument;
+            if (!d || !d.body) return false;
+            const txt = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
+            return /考试名称|考试时间|开始时间|结束时间/.test(txt);
+          });
+          const d = (frame as HTMLIFrameElement).contentDocument;
+          if (d && d.body) {
+            liveRaw = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
+            method = 'injected-iframe';
+          }
+          frame.remove();
+        } catch (e) {
+          liveRaw = 'live-error:' + String(e).slice(0, 120);
+          method = 'exception';
+        }
+        return { liveRaw, method };
+      };
+
+      let result: DiagnosticExamProbe | null = null;
+      for (const target of examTargets) {
+        const rel = target.getAttribute('data-url') || '';
+        if (!rel) continue;
+        const abs = new URL(rel, window.location.href).toString();
+        const source = (() => {
+          try {
+            return new URL(abs).pathname;
+          } catch {
+            return rel;
+          }
+        })();
+
+        // 对照：fetch 静态 HTML（预期 only 外壳）。
+        let fetchStatus = 0;
+        let fetchOk = false;
+        let fetchRaw = '';
+        try {
+          const res = await fetch(abs, { credentials: 'include' });
+          fetchStatus = res.status;
+          fetchOk = res.ok;
+          const html = res.ok ? await res.text() : '';
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          fetchRaw = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+        } catch (e) {
+          fetchRaw = 'fetch-error:' + String(e).slice(0, 120);
+        }
+
+        const { liveRaw, method } = await probeOne(abs);
+        const bestRaw =
+          liveRaw && !liveRaw.startsWith('live-error') && !liveRaw.startsWith('fetch-error')
+            ? liveRaw
+            : fetchRaw;
+        const parsed = parseExam(bestRaw);
+        const probe: DiagnosticExamProbe = {
+          source,
+          method,
+          ok: fetchOk,
+          status: fetchStatus,
+          parsed,
+          textSample: redactLongTokens(bestRaw).slice(0, 1500),
+          error: null,
+        };
+        if (!parsed) {
+          result = probe; // 解析失败样本优先取证回传
           break;
         }
+        if (!result) result = probe;
       }
-      if (!target) target = document.querySelector('li.dataBody_item .openNotice[data-url]');
-      const rel = target?.getAttribute('data-url') || '';
-      if (!rel) return null;
-      const abs = new URL(rel, window.location.href).toString();
-      const source = (() => {
-        try {
-          return new URL(abs).pathname;
-        } catch {
-          return rel;
-        }
-      })();
-
-      // 对照：fetch 静态 HTML（预期 only 外壳）。
-      let fetchStatus = 0;
-      let fetchOk = false;
-      let fetchRaw = '';
-      try {
-        const res = await fetch(abs, { credentials: 'include' });
-        fetchStatus = res.status;
-        fetchOk = res.ok;
-        const html = res.ok ? await res.text() : '';
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        fetchRaw = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-      } catch (e) {
-        fetchRaw = 'fetch-error:' + String(e).slice(0, 120);
-      }
-
-      // 实测：自建同源隐藏 iframe 加载详情，读已渲染 DOM（主页面不跳转、不误点“考试”）。
-      let liveRaw = '';
-      let method: string = 'none';
-      try {
-        const waitForRender = async (
-          pred: () => boolean,
-          timeoutMs = 6000,
-          intervalMs = 200,
-        ): Promise<void> => {
-          const start = Date.now();
-          while (Date.now() - start < timeoutMs) {
-            let ok = false;
-            try {
-              ok = pred();
-            } catch {
-              ok = false;
-            }
-            if (ok) return;
-            await wait(intervalMs);
-          }
-        };
-        const frame = document.createElement('iframe');
-        frame.style.display = 'none';
-        frame.src = abs;
-        document.body.appendChild(frame);
-        await waitForRender(() => {
-          const d = (frame as HTMLIFrameElement).contentDocument;
-          if (!d || !d.body) return false;
-          const txt = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
-          return /考试名称|结束时间|开始时间/.test(txt);
-        });
-        const d = (frame as HTMLIFrameElement).contentDocument;
-        if (d && d.body) {
-          liveRaw = (d.body.innerText || '').replace(/\s+/g, ' ').trim();
-          method = 'injected-iframe';
-        }
-        frame.remove();
-      } catch (e) {
-        liveRaw = 'live-error:' + String(e).slice(0, 120);
-        method = 'exception';
-      }
-
-      const bestRaw =
-        liveRaw && !liveRaw.startsWith('live-error') && !liveRaw.startsWith('fetch-error')
-          ? liveRaw
-          : fetchRaw;
-      const parsed = parseExam(bestRaw);
-      return {
-        source,
-        method,
-        ok: fetchOk,
-        status: fetchStatus,
-        parsed,
-        textSample: redactLongTokens(bestRaw).slice(0, 1500),
-        error: null,
-      };
+      return result;
     } catch (e) {
       return {
         source: '',

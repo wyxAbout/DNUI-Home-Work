@@ -22,6 +22,11 @@ export default defineContentScript({
     'https://i.chaoxing.com/*',
     'https://notice.chaoxing.com/*',
   ],
+  // 关键：学习通收件箱渲染在 i.chaoxing.com 页面内嵌的 notice.chaoxing.com iframe 中，
+  // 顶层主框架读不到跨域 iframe 的内容（chaoxing.ts 对 i.chaoxing.com 顶层直接 return null）。
+  // 必须让 content script 也注入子框架，才能在 notice.chaoxing.com/myNotice 上下文里解析列表。
+  // 其它平台的非列表 iframe 经 getPlatformAdapter 按 host 过滤后会 return null，不受影响。
+  allFrames: true,
   runAt: 'document_idle',
   main() {
     const state = globalThis as unknown as Record<string, unknown>;

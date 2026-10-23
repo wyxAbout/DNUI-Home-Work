@@ -129,6 +129,93 @@ test('parseChaoxingExamDetailText：非考试详情正文返回 null', () => {
   assert.equal(parseChaoxingExamDetailText('收件箱 作业:《线性代数》作业指导手册'), null);
 });
 
+// ===== 格式 2（2026-10-23 看板截图证据）：详情用“考试时间： MM-DD HH:MM 至 MM-DD HH:MM”，
+// 无“开始/结束时间”标签、无年份，可能附“考试时长： N分钟”。缺省年份按调用方年份补齐。=====
+const EXAM_DETAIL_TEXT_V2 =
+  '考试通知 学习通知 转发 收藏 课程名称：概率论 考试名称：【64】概率论第1章单元测试 ' +
+  '考试时间： 09-14 16:45 至 09-14 17:00 考试形式：网考';
+
+test('parseChaoxingExamDetailText：格式2“考试时间…至…”无年份，按调用方年份补齐', () => {
+  const d = parseChaoxingExamDetailText(EXAM_DETAIL_TEXT_V2, { year: 2026 });
+  assert.ok(d);
+  assert.equal(d?.courseName, '概率论');
+  // 考试名称必须在“考试时间”标签前截断，不能吞掉时间文本
+  assert.equal(d?.examTitle, '【64】概率论第1章单元测试');
+  assert.equal(d?.startAt, '2026-09-14T16:45');
+  assert.equal(d?.endAt, '2026-09-14T17:00');
+});
+
+test('parseChaoxingExamDetailText：格式2粘连形态 + 考试时长标签不干扰', () => {
+  const glued =
+    '考试通知转发收藏课程名称：概率论考试名称：【64】概率论第2章单元测试' +
+    '考试时间：10-1216:45至10-1217:00考试时长：90分钟';
+  const d = parseChaoxingExamDetailText(glued, { year: 2026 });
+  assert.ok(d);
+  assert.equal(d?.examTitle, '【64】概率论第2章单元测试');
+  assert.equal(d?.startAt, '2026-10-12T16:45');
+  assert.equal(d?.endAt, '2026-10-12T17:00');
+});
+
+// ===== 跨年通知“就近补年”（规则 1b）：无年份的格式 2 若按当前年补会落进遥远过去
+// （典型：12 月发 1 月考），判为跨年、起止时间整体 +1 年。=====
+test('parseChaoxingExamDetailText：跨年格式2（12月发1月考）整体翻到下一年', () => {
+  // 模拟“现在”是 2026-12-20：通知 12 月发出，考试在次年 1 月。
+  const nowMs = new Date('2026-12-20T10:00:00').getTime();
+  const d = parseChaoxingExamDetailText(
+    '课程名称：大学物理 考试名称：期末考试 考试时间： 01-10 09:00 至 01-10 10:30',
+    { year: 2026, nowMs },
+  );
+  assert.ok(d);
+  assert.equal(d?.startAt, '2027-01-10T09:00');
+  assert.equal(d?.endAt, '2027-01-10T10:30');
+});
+
+test('parseChaoxingExamDetailText：半年内的过期格式2不翻年（本学期过期照旧判过期）', () => {
+  const nowMs = new Date('2026-10-23T10:00:00').getTime();
+  const d = parseChaoxingExamDetailText(EXAM_DETAIL_TEXT_V2, { year: 2026, nowMs });
+  assert.ok(d);
+  assert.equal(d?.endAt, '2026-09-14T17:00'); // 仅落后 ~39 天，不翻年
+});
+
+test('parseChaoxingExamDetailText：格式2自带年份时不翻年（日期本身无歧义）', () => {
+  const nowMs = new Date('2026-12-20T10:00:00').getTime();
+  const d = parseChaoxingExamDetailText(
+    '课程名称：大学物理 考试名称：期末考试 考试时间： 2026-01-10 09:00 至 2026-01-10 10:30',
+    { year: 2026, nowMs },
+  );
+  assert.ok(d);
+  assert.equal(d?.startAt, '2026-01-10T09:00');
+  assert.equal(d?.endAt, '2026-01-10T10:30');
+});
+
+test('mapChaoxingExamAssignment：格式2详情→dueAt=结束时刻，按时间判定状态', () => {
+  const now = new Date('2026-10-23T10:00:00').getTime();
+  // 已过期样本（看板截图：概率论第1章，09-14 结束）
+  const past = parseChaoxingExamDetailText(EXAM_DETAIL_TEXT_V2, { year: 2026 });
+  assert.ok(past);
+  const aPast = mapChaoxingExamAssignment(
+    { id: 'EXAM2', title: T_EXAM, sender: '学习通知', detailUrl: 'https://notice.chaoxing.com/z' },
+    past,
+    { syncedAt: '2026-10-23T02:07:42.000Z', nowMs: now },
+  );
+  assert.equal(aPast.dueAt, '2026-09-14T17:00');
+  assert.equal(aPast.status, 'expired');
+
+  // 未过期样本（看板截图：25级-大学物理-课后测试4，10-15 09:35 至 10-31 10:35）
+  const future = parseChaoxingExamDetailText(
+    '课程名称：大学物理 考试名称：25级-大学物理-课后测试4 考试时间： 10-15 09:35 至 10-31 10:35 考试时长： 10分钟',
+    { year: 2026 },
+  );
+  assert.ok(future);
+  const aFuture = mapChaoxingExamAssignment(
+    { id: 'EXAM3', title: T_EXAM, sender: '学习通知', detailUrl: 'https://notice.chaoxing.com/w' },
+    future,
+    { syncedAt: '2026-10-23T02:07:42.000Z', nowMs: now },
+  );
+  assert.equal(aFuture.dueAt, '2026-10-31T10:35');
+  assert.equal(aFuture.status, 'unsubmitted'); // 结束时间在未来 → 待做
+});
+
 test('decideChaoxingExamStatus：过结束时间→expired，未到→unsubmitted，无时间→unsubmitted', () => {
   const now = new Date('2026-10-23T10:00:00').getTime();
   assert.equal(decideChaoxingExamStatus('2026-10-21T11:40', now), 'expired'); // 截图场景：已过结束时间
