@@ -295,7 +295,7 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   const findAssignmentTab = (): HTMLElement | null => {
     for (const el of Array.from(document.querySelectorAll('*'))) {
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/^作业/.test(text)) continue;
+      if (!/^(作业|收件箱|消息|未读|待办)/.test(text)) continue;
       if (text.length > 16) continue;
       if (el.children.length > 3) continue;
       if (el.tagName === 'BODY' || el.tagName === 'HTML') continue;

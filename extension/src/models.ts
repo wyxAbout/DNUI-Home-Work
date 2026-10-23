@@ -1,4 +1,4 @@
-export type PlatformId = 'neusoft' | 'pigai' | 'itest';
+export type PlatformId = 'neusoft' | 'pigai' | 'itest' | 'chaoxing';
 
 export type PlatformSyncStatus =
   | 'never'
@@ -58,29 +58,28 @@ export interface HomeworkStore {
   updatedAt: string | null;
 }
 
-export const PLATFORM_IDS: PlatformId[] = ['neusoft', 'pigai', 'itest'];
+export const PLATFORM_IDS: PlatformId[] = ['neusoft', 'pigai', 'itest', 'chaoxing'];
 
 export const PLATFORM_LABELS: Record<PlatformId, string> = {
   neusoft: '东软智慧教育',
   pigai: '批改网',
   itest: 'iTEST',
+  chaoxing: '学习通邮箱',
 };
 
 export const PLATFORM_HOSTS: Record<PlatformId, string[]> = {
   neusoft: ['study.neusoft.edu.cn'],
   pigai: ['pigai.org', 'www.pigai.org'],
   itest: ['sso.unipus.cn', 'itestcloud.unipus.cn'],
+  chaoxing: ['i.chaoxing.com'],
 };
 
 export function createEmptyStore(): HomeworkStore {
-  return {
-    platforms: {
-      neusoft: createEmptySnapshot('neusoft'),
-      pigai: createEmptySnapshot('pigai'),
-      itest: createEmptySnapshot('itest'),
-    },
-    updatedAt: null,
-  };
+  const platforms = {} as Record<PlatformId, PlatformSnapshot>;
+  for (const id of PLATFORM_IDS) {
+    platforms[id] = createEmptySnapshot(id);
+  }
+  return { platforms, updatedAt: null };
 }
 
 export function createEmptySnapshot(platformId: PlatformId): PlatformSnapshot {

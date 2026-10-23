@@ -292,7 +292,7 @@ function App() {
           void appendLog(
             'error',
             'sync',
-            '当前页无法注入脚本：请确认它是东软/批改网/iTEST 页面，并重载扩展授予 scripting 权限',
+            '当前页无法注入脚本：请确认它是东软/批改网/iTEST/学习通邮箱 页面，并重载扩展授予 scripting 权限',
           );
         } else if (after === BUILD_ID) {
           void appendLog(
@@ -337,7 +337,7 @@ function App() {
       });
       const report = results?.[0]?.result as DiagnosticReport | undefined;
       if (!report) {
-        setDiagnosticError('未能读取页面结构：请确认当前标签页是东软/批改网/iTEST 的作业页面。');
+        setDiagnosticError('未能读取页面结构：请确认当前标签页是东软/批改网/iTEST/学习通邮箱 的页面。');
         setReport(null);
         void appendLog('warn', 'diagnostic', '诊断：页面未返回结构，可能不是平台页面');
         return;
@@ -351,7 +351,7 @@ function App() {
       );
     } catch {
       setDiagnosticError(
-        '诊断失败：请确认当前标签页属于三个教学平台之一，并已在扩展管理页重新加载本扩展以授予“scripting”权限。',
+        '诊断失败：请确认当前标签页属于四个教学平台之一（东软/批改网/iTEST/学习通邮箱），并已在扩展管理页重新加载本扩展以授予“scripting”权限。',
       );
       setReport(null);
       void appendLog('error', 'diagnostic', '诊断失败：注入执行异常');
@@ -645,7 +645,7 @@ function App() {
             <div className="empty-state">
               <div className="empty-icon">✓</div>
               <h2>当前没有已同步的未提交作业</h2>
-              <p>访问并登录东软智慧教育、批改网或 iTEST 后，插件会更新对应平台。</p>
+              <p>访问并登录东软智慧教育、批改网、iTEST 或学习通邮箱后，插件会更新对应平台。</p>
               {/* 开了“自动隐藏已过期项”且未提交项全部过期时，需明确告知，
                   否则用户会误以为“真的没有待办”，其实是被隐藏了。 */}
               {visibleCount === 0 && hiddenCount > 0 && (

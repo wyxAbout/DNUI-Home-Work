@@ -1,5 +1,6 @@
 import {
   createEmptyStore,
+  PLATFORM_IDS,
   type Assignment,
   type HomeworkStore,
   type PlatformId,
@@ -46,14 +47,11 @@ export async function loadHomeworkStore(): Promise<HomeworkStore> {
     return empty;
   }
 
-  return {
-    platforms: {
-      neusoft: normalizeSnapshot(stored.platforms.neusoft ?? empty.platforms.neusoft),
-      pigai: normalizeSnapshot(stored.platforms.pigai ?? empty.platforms.pigai),
-      itest: normalizeSnapshot(stored.platforms.itest ?? empty.platforms.itest),
-    },
-    updatedAt: stored.updatedAt ?? null,
-  };
+  const platforms = {} as Record<PlatformId, PlatformSnapshot>;
+  for (const id of PLATFORM_IDS) {
+    platforms[id] = normalizeSnapshot(stored.platforms[id] ?? empty.platforms[id]);
+  }
+  return { platforms, updatedAt: stored.updatedAt ?? null };
 }
 
 export async function saveHomeworkStore(store: HomeworkStore): Promise<void> {

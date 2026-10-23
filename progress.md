@@ -121,3 +121,9 @@
   - `models.test.ts`：新增 3 例 `isAssignmentExpired` 单测（null/非法→未过期；明显过去→过期；明显未来→未过期）。
   - 验证：`npm run compile` 零错误；`npm test` 28/28 通过（东软 14 + iTEST 5 + 批改网 5 + 新增 3 + 原有 models 3）；`npm run build` 成功（**content.js 仍 17.30 kB**——开关是纯展示层、解析器未改动，符合预期；popup chunk 与 CSS 体积因新 UI 略增）。
   - 设计取舍：隐藏是"显示偏好"而非"删除数据"——过期但平台仍标未提交的作业仍留在 `homework-store` 缓存里，关掉开关立即恢复显示；不会因前端发版或用户改主意而丢失。
+
+- 2026-10-23（上午）：启动**学习通邮箱模块**（i.chaoxing.com 消息中心收件箱），按用户要求与批改网/iTEST 同等级接入。严格沿用"先取证、再落地"规矩，严禁猜域名/接口/状态文案。
+  - 前置澄清（用户已确认）：入口域 `i.chaoxing.com`；目标界面为"消息中心收件箱"；"还需要做的任务"具体判定留待诊断取证后再定。
+  - 同等级接线全部完成：`models.ts` 新增 `chaoxing` 平台（PlatformId/PLATFORM_IDS/PLATFORM_LABELS=学习通邮箱/PLATFORM_HOSTS=i.chaoxing.com），并把 `createEmptyStore`/`loadHomeworkStore` 改为按 `PLATFORM_IDS` 遍历（避免漏接）；新增 `extension/src/chaoxing.ts` 占位解析器（仅认 i.chaoxing.com 域、返回 `needs-verification` 且不覆盖缓存，与东软/iTEST/批改网占位行为一致，文件头注明待实现纯函数签名）；`platforms.ts` 注册适配器；`content.ts` 与 `wxt.config.ts` 各自加入 `https://i.chaoxing.com/*`；`storage.ts` 归一化覆盖 `chaoxing`；`popup/App.tsx` 文案（空态/诊断错误/注入失败提示）纳入学习通邮箱；`diagnose.ts` 的主动点击关键词由仅"作业"扩展为含"收件箱/消息/未读/待办"，使诊断能主动进入收件箱取证。
+  - 验证：`npm run compile` 零错误；`npm test` 28/28 通过（既有东软/iTEST/批改网/模型单测未受影响）；`npm run build` 成功（content.js 17.30→17.73 kB），构建产物 manifest 的 `host_permissions` 与 `content_scripts.matches` 均含 `https://i.chaoxing.com/*`，确认接线已进发布包（D 盘 `.output/chrome-mv3`）。
+  - 下一步（对应"测试"环节）：用户在 Edge 重载扩展 → 登录 i.chaoxing.com 打开消息中心收件箱 → 点看板"诊断当前页面" → 把去敏摘要（hostname/mainText/requests/tree/tabs）贴回。据此确认收件箱真实结构、"还需要做的任务"的判定方式后，落地 `chaoxing.ts` 真实解析并补 `chaoxing.test.ts`（即"生成最终结果"）。

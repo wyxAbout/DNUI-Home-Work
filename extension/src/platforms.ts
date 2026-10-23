@@ -7,6 +7,7 @@ import {
 import { extractNeusoftAssignments } from './neusoft';
 import { extractItestAssignments } from './itest';
 import { extractPigaiAssignments } from './pigai';
+import { extractChaoxingAssignments } from './chaoxing';
 
 export interface PlatformAdapter {
   id: PlatformId;
@@ -47,6 +48,12 @@ const adapters: PlatformAdapter[] = [
     label: PLATFORM_LABELS.itest,
     matchesUrl: (url) => hostMatches(url, PLATFORM_HOSTS.itest),
     extract: (document, url, options) => extractItestAssignments(document, url, options),
+  },
+  {
+    id: 'chaoxing',
+    label: PLATFORM_LABELS.chaoxing,
+    matchesUrl: (url) => hostMatches(url, PLATFORM_HOSTS.chaoxing),
+    extract: (document, url, options) => extractChaoxingAssignments(document, url, options),
   },
 ];
 

@@ -22,6 +22,7 @@ export default defineConfig({
       'https://sso.unipus.cn/*',
       'https://itestcloud.unipus.cn/*',
       'https://*.unipus.cn/*',
+      'https://i.chaoxing.com/*',
     ],
     action: {
       default_title: '打开作业看板',
