@@ -28,15 +28,22 @@
 //          标题以“考试”开头 → exam；其余排除。
 // 4) 作业下发通知：收件箱不提供“是否已提交”状态，统一 status='unsubmitted'（不臆测）、dueAt=null。
 //
-// 考试通知判定规则（用户 2026-10-23 口述 + 两张截图证据）：
-//   1. 注意时间：考试通知详情页（列表项 openNotice[data-url]，同域 notice.chaoxing.com，
-//      fetch 带 cookie 等价于手动点开，不触发页面跳转/不会误入答题）含结构化文本：
+// 考试通知判定规则（用户 2026-10-23 口述 + 两张截图证据 + 收件箱诊断 JSON 验证）：
+//   1. 注意时间（已落地，自动化可行）：
+//      考试通知详情页（列表项 openNotice[data-url]，同域 notice.chaoxing.com）含结构化文本：
 //      “课程名称：… 考试名称：… 开始时间：YYYY-MM-DD HH:MM 结束时间：YYYY-MM-DD HH:MM …”。
 //      解析出 结束时间 → dueAt；当前时间已过结束时间 → 考试已结束（status='expired'，
 //      看板显示“已过期”，配合“自动隐藏已过期项”即不再占位）。
-//   2. 交卷成功：点击详情页“考试”卡片后若显示“交卷成功（提交方式：学生交卷）”则判定作业结束。
-//      该卡片真实链接/DOM 尚无证据（铁律不猜），待用户对详情页与交卷成功页各做一轮诊断后，
-//      再以 fetch 方式静默核验“交卷成功”文案（fetch 不导航，不会误启动考试）。
+//      取证手段（关键修复）：此前 fetch 详情页只拿到 SPA 静态外壳（无考试字段，parsed 恒 null），
+//      故改用隐藏同源 iframe 加载详情、读取“已渲染的实时 DOM”再解析 —— 已用诊断验证
+//      method=injected-iframe 且 parsed 真实有效（课程名/考试名/起止时间齐全）。
+//   2. 交卷成功（自动化不可行，已用证据坐实，须如实记录）：
+//      用户规则“点击‘考试’后若显示‘交卷成功（提交方式：学生交卷）’则判定作业结束”。
+//      但 2026-10-23 的诊断证实：收件箱“通知详情”页只渲染“课程名称/考试名称/起止时间/考试形式”
+//      + 评论区，根本不含“交卷成功”提交状态；“交卷成功”位于真正的“考试”答题页，
+//      进入该页有触发答题/交卷风险，违反铁律“绝不误点‘考试’按钮启动答题”，故不能自动核验。
+//      结论：本模块以“注意时间”作为自动化信号（窗口内=待做，窗口外=已过期并隐藏）；
+//      “交卷成功”需用户手动在平台确认，无法由扩展静默判定。
 
 import type { Assignment, PlatformExtractionResult } from './models';
 import { slugifyCourse } from './neusoft.ts';
@@ -227,17 +234,45 @@ function readRawItems(doc: Document): RawChaoxingItem[] {
   return out;
 }
 
-// fetch 考试通知详情页正文（同域 notice.chaoxing.com，带 cookie 等价于手动点开通知，
-// 不触发导航、不会进入答题页）。失败返回 null，由调用方诚实降级。
-async function fetchNoticeDetailText(url: string): Promise<string | null> {
+// 读取考试通知详情页“已渲染的实时 DOM”正文（关键修复，2026-10-23 确诊并落地）。
+//
+// 根因（用户同日前述诊断证实）：直接 fetch 详情页只返回 SPA 静态外壳
+// （仅工具栏 + 内联脚本，不含“课程名称/考试名称/开始/结束时间”等字段），
+// 故此前 parseChaoxingExamDetailText 永远拿不到 endAt，“注意时间”判定彻底失效。
+// 考试字段由前端 JS 异步渲染进 DOM，必须读取“已渲染的实时 DOM”才能拿到。
+//
+// 取证手段（与诊断工具 probeExamDetail 情形 B 完全一致，已验证 method=injected-iframe
+// 且 parsed 真实有效）：列表页与详情页同域 notice.chaoxing.com，自建一个隐藏的同源
+// iframe 加载该详情（等价手动点开“通知”——主页面不跳转、也绝不误点“考试”按钮启动答题），
+// 待其 JS 渲染出考试字段后，读取 contentDocument.body.innerText（已渲染文本），
+// 再交给 parseChaoxingExamDetailText。失败（跨域/CSP/超时）返回 null，由调用方诚实降级。
+//
+// 安全边界：此 iframe 只读“通知详情”页，绝不加载“考试”答题页；后者含“交卷成功”的提交状态，
+// 但进入该页有触发答题/交卷风险，违反铁律，故“交卷成功”自动核验不在本函数范围内（见头部规则 2）。
+async function readNoticeDetailText(doc: Document, url: string): Promise<string | null> {
+  const body = doc.body;
+  if (!body) return null;
+  const frame = doc.createElement('iframe');
+  frame.setAttribute(
+    'style',
+    'position:absolute;left:-9999px;top:-9999px;width:0;height:0;border:0;display:none;',
+  );
+  frame.src = url;
+  body.appendChild(frame);
   try {
-    const res = await fetch(url, { credentials: 'include' });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    return doc.body?.textContent ?? '';
+    const readRendered = (): string => {
+      const d = (frame as HTMLIFrameElement).contentDocument;
+      if (!d || !d.body) return '';
+      return (d.body.innerText || '').replace(/\s+/g, ' ').trim();
+    };
+    // 有界等待渲染：最多 6s、200ms 轮询，直到正文出现考试字段。
+    await waitFor(() => /考试名称|结束时间|开始时间/.test(readRendered()), 6000, 200);
+    const text = readRendered();
+    return text || null;
   } catch {
     return null;
+  } finally {
+    frame.remove();
   }
 }
 
@@ -285,14 +320,19 @@ export async function extractChaoxingAssignments(
   const syncedAt = new Date().toISOString();
   const nowMs = Date.now();
 
-  // 考试通知：逐条 fetch 详情页解析“课程/考试名/开始/结束时间”（“注意时间”判定）。
-  // 顺序请求，条数通常为个位数；失败降级为列表信息（不臆测）。
-  const examAssignments: Assignment[] = [];
-  for (const item of examItems) {
-    const text = await fetchNoticeDetailText(item.detailUrl);
-    const detail = text ? parseChaoxingExamDetailText(text) : null;
-    examAssignments.push(mapChaoxingExamAssignment(item, detail, { syncedAt, nowMs }));
-  }
+  // 考试通知：逐条读取详情页“已渲染 DOM”解析“课程/考试名/开始/结束时间”（“注意时间”判定）。
+  // 列表页与详情页同域 notice.chaoxing.com，自建隐藏 iframe 等价于手动点开“通知”
+  // （主页面不跳转、绝不误点“考试”按钮），并行取数以缩短等待；单条失败降级为列表信息（不臆测）。
+  const examDetails: (ChaoxingExamDetail | null)[] = await Promise.all(
+    examItems.map((item) =>
+      readNoticeDetailText(doc, item.detailUrl).then((text) =>
+        text ? parseChaoxingExamDetailText(text) : null,
+      ),
+    ),
+  );
+  const examAssignments: Assignment[] = examItems.map((item, i) =>
+    mapChaoxingExamAssignment(item, examDetails[i] ?? null, { syncedAt, nowMs }),
+  );
 
   const assignments = [
     ...mapChaoxingAssignments(homeworkItems, { syncedAt }),
