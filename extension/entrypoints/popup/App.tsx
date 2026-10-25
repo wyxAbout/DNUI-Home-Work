@@ -10,7 +10,7 @@ import {
   type HomeworkStore,
   type PlatformId,
 } from '@/src/models';
-import { loadHomeworkStore, loadHideExpired, saveHideExpired } from '@/src/storage';
+import { loadHomeworkStore, loadHideExpired, saveHideExpired, loadStartupNotifyEnabled, saveStartupNotifyEnabled } from '@/src/storage';
 import { collectPageDiagnostic, type DiagnosticReport } from '@/src/diagnose';
 import { loadLog, clearLog, appendLog, type LogEntry } from '@/src/log';
 import { BUILD_ID } from '@/src/build';
@@ -144,6 +144,8 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   // 显示偏好：开启后隐藏“截止时间已过期”的未提交作业（不动缓存）。默认关闭。
   const [hideExpired, setHideExpired] = useState(false);
+  // 开关：重新打开浏览器时是否在右下角强制弹出作业提醒。默认开启（保持原有行为）。
+  const [startupNotify, setStartupNotify] = useState(false);
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [report, setReport] = useState<DiagnosticReport | null>(null);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
@@ -166,6 +168,7 @@ function App() {
     void refreshStore();
     void refreshLog();
     void loadHideExpired().then(setHideExpired);
+    void loadStartupNotifyEnabled().then(setStartupNotify);
 
     const listener = (changes: Record<string, unknown>) => {
       if (changes['homework-store']) void refreshStore();
@@ -459,6 +462,28 @@ function App() {
           title="开启后，截止时间已过的作业将从看板隐藏（仍保留在缓存中，关闭即恢复显示）"
         >
           <span className="toggle-text">自动隐藏已过期项</span>
+          <span className="toggle-switch" aria-hidden="true">
+            <span className="toggle-knob" />
+          </span>
+        </button>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={startupNotify}
+          className={`toggle ${startupNotify ? 'on' : ''}`}
+          onClick={async () => {
+            const next = !startupNotify;
+            setStartupNotify(next);
+            await saveStartupNotifyEnabled(next);
+            void appendLog(
+              'info',
+              'display',
+              next ? '已开启：重新打开浏览器时强制播报' : '已关闭：重开浏览器不再强制播报',
+            );
+          }}
+          title="关闭后，重新打开浏览器不再在右下角强制弹出作业提醒；但作业数量变化时仍会正常通知。"
+        >
+          <span className="toggle-text">重开浏览器时弹出作业提醒</span>
           <span className="toggle-switch" aria-hidden="true">
             <span className="toggle-knob" />
           </span>

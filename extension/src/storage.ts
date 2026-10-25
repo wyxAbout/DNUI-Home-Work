@@ -91,3 +91,22 @@ export async function loadHideExpired(): Promise<boolean> {
 export async function saveHideExpired(value: boolean): Promise<void> {
   await browser.storage.local.set({ [HIDE_EXPIRED_KEY]: value });
 }
+
+// 「重新打开浏览器时强制播报」开关，默认开启（保持原有行为）。
+// 存 storage 而非内存：MV3 后台会被回收，需要跨会话持久化；未设置时默认开启。
+const STARTUP_NOTIFY_ENABLED_KEY = 'startup-notify-enabled';
+
+export async function loadStartupNotifyEnabled(): Promise<boolean> {
+  try {
+    const result = await browser.storage.local.get(STARTUP_NOTIFY_ENABLED_KEY);
+    // 未设置过时默认开启；仅显式 false 才关闭。
+    return result[STARTUP_NOTIFY_ENABLED_KEY] !== false;
+  } catch {
+    // 读不到按默认开启，避免存储异常导致功能静默失效。
+    return true;
+  }
+}
+
+export async function saveStartupNotifyEnabled(value: boolean): Promise<void> {
+  await browser.storage.local.set({ [STARTUP_NOTIFY_ENABLED_KEY]: value });
+}
