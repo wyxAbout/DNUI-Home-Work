@@ -1,8 +1,8 @@
 import { getPlatformAdapter } from '@/src/platforms';
 import { BUILD_ID } from '@/src/build';
-import { getAllAssignments, isAssignmentExpired, type PlatformExtractionResult } from '@/src/models';
+import { getAllAssignments, isAssignmentVisible, type PlatformExtractionResult } from '@/src/models';
 import { SelectorError, SELECTORS_VERSION } from '@/src/selectors';
-import { loadHideExpired, loadHomeworkStore } from '@/src/storage';
+import { loadHideExpired, loadHomeworkStore, loadShowPageBadge } from '@/src/storage';
 
 // 防重复注入：popup 在检测到旧版脚本后会补注入本文件，
 // 同一页面里重复执行 main() 会导致重复上报/重复监听，这里只允许初始化一次。
@@ -61,17 +61,26 @@ async function renderHomeworkBadge(): Promise<void> {
     // 子框架（iframe）不注入，避免与顶层框架的浮层重复。
     return;
   }
+
+  // 总开关：关闭「在页面内显示浮层」后，不再注入/显示浮层（仅保留图标角标与弹窗）。
+  const showPageBadge = await loadShowPageBadge();
+  const existing = document.getElementById(BADGE_ID);
+  if (!showPageBadge) {
+    existing?.remove();
+    return;
+  }
+
   ensureBadgeStyle();
 
   const store = await loadHomeworkStore();
   const hideExpired = await loadHideExpired();
   const assignments = getAllAssignments(store);
   const total = assignments.length;
-  const visible = hideExpired
-    ? assignments.filter((a) => !isAssignmentExpired(a.dueAt)).length
-    : total;
+  // 与看板「未完成 N 项」完全同口径：使用统一判定 isAssignmentVisible
+  // （默认隐藏 completed/ended，开启开关时再隐藏已过期项），避免页面浮层数字
+  // 把已完成/已结束也算进“未完成”，从而与弹窗/角标对不上（2026-10-29 问题 1 的遗漏点）。
+  const visible = assignments.filter((a) => isAssignmentVisible(a, { hideExpired })).length;
 
-  const existing = document.getElementById(BADGE_ID);
   if (visible === 0) {
     // 没有可见的未完成任务：移除浮层，避免空浮层。
     existing?.remove();
@@ -79,7 +88,7 @@ async function renderHomeworkBadge(): Promise<void> {
   }
 
   const hidden = total - visible;
-  const sub = hidden > 0 ? `另有 ${hidden} 项已过期被隐藏` : '';
+  const sub = hidden > 0 ? `另有 ${hidden} 项已完成或已过期` : '';
   const html =
     `<div class="hw-title">作业整合看板</div>` +
     `<div class="hw-count">未完成 ${visible} 项</div>` +
@@ -126,6 +135,13 @@ export default defineContentScript({
     'https://*.unipus.cn/*',
     'https://i.chaoxing.com/*',
     'https://notice.chaoxing.com/*',
+    // 泛雅课程空间：mooc1（我的课程 / 作业·考试列表 iframe）、mooc2-ans（课程页外壳）、
+    // 以及 `*.chaoxing.com` 覆盖的 mobilelearn（任务·活动列表 iframe）。
+    // 课程页外壳本身没有列表 DOM（chaoxing.ts 对 mooc2-ans 顶层 return null），
+    // 真正的作业/考试/任务列表由内容 iframe 上下文解析——故必须 allFrames:true。
+    'https://mooc1.chaoxing.com/*',
+    'https://mooc2-ans.chaoxing.com/*',
+    'https://*.chaoxing.com/*',
   ],
   // 关键：学习通收件箱渲染在 i.chaoxing.com 页面内嵌的 notice.chaoxing.com iframe 中，
   // 顶层主框架读不到跨域 iframe 的内容（chaoxing.ts 对 i.chaoxing.com 顶层直接 return null）。
@@ -181,12 +197,61 @@ export default defineContentScript({
         courseName: result.courseName,
         courseIds: result.courseIds,
         replaceAll: result.replaceAll,
+        // 课程注册表（目前仅学习通「我的课程」页产出），后台整体覆盖写入。
+        courses: result.courses,
         message: result.message,
         buildId: BUILD_ID,
       });
     };
 
     void reportPage(false);
+
+    // 采集学习通列表页的**真实地址**并交给后台记住。
+    // 为什么与解析结果无关、失败也要采：作业/考试列表必须带服务端下发的 enc，
+    // 自拼 `courseid + clazzid` 大多只能打开一张「提示」弹窗（正文 0 字、无列表），
+    // 于是逐课同步的作业页永远失败。页面上的真实链接带全参数，是唯一可靠来源。
+    // 只收带 enc 的作业/考试列表地址：不带 enc 的多半就是自拼出来的坏地址，
+    // 记下来只会让下次更差（任务页本来就只需 courseid/clazzid，不强制 enc）。
+    const reportChaoxingUrlHints = () => {
+      if (!/(^|\.)chaoxing\.com$/.test(window.location.hostname)) {
+        return;
+      }
+      const urls: string[] = [];
+      const push = (raw: string | null | undefined) => {
+        const value = (raw || '').trim();
+        if (!value) {
+          return;
+        }
+        try {
+          const abs = new URL(value, window.location.href).toString();
+          if (!/exam-list|stuActiveList/.test(abs)) {
+            return;
+          }
+          if (/exam-list/.test(abs) && !/[?&]enc=/.test(abs)) {
+            return;
+          }
+          if (!urls.includes(abs)) {
+            urls.push(abs);
+          }
+        } catch {
+          // 非法 href：忽略。
+        }
+      };
+      push(window.location.href);
+      try {
+        for (const anchor of Array.from(document.querySelectorAll('a[href]'))) {
+          push(anchor.getAttribute('href'));
+        }
+      } catch {
+        // 取链接失败不影响主流程。
+      }
+      if (urls.length > 0) {
+        void browser.runtime.sendMessage({ type: 'CHAOXING_URL_HINT', urls });
+      }
+    };
+    reportChaoxingUrlHints();
+    // 课程页的「作业」入口来自异步渲染的菜单，DOM 就绪后可能还没出来，补扫一次。
+    window.setTimeout(reportChaoxingUrlHints, 1500);
 
     // 页面内右下角浮层：打开页面即显示未完成数量（不受 Windows 通知规则限制，100% 可见）。
     // 仅在顶层框架渲染（renderHomeworkBadge 内部已做 window.top 守卫）。
@@ -198,7 +263,7 @@ export default defineContentScript({
       if (area !== 'local') {
         return;
       }
-      if (changes['homework-store'] || changes['hide-expired']) {
+      if (changes['homework-store'] || changes['hide-expired'] || changes['show-page-badge']) {
         void renderHomeworkBadge();
       }
     });

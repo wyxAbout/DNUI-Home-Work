@@ -9,7 +9,7 @@
 
 import type { PlatformId } from './models';
 
-export const SELECTORS_VERSION = 1;
+export const SELECTORS_VERSION = 2;
 
 export interface SelectorConfig {
   /** 列表容器 / 关键结构锚点：用于判断页面是否真的渲染成功。 */
@@ -73,6 +73,27 @@ export const PLATFORM_SELECTOR_CONFIG: Record<PlatformId, SelectorConfig> = {
       detailUrl: '.openNotice',
       detailUrlAttr: 'data-url',
       itemIdAttr: 'data-id',
+      // 任务/活动列表（mobilelearn.chaoxing.com/page/active/stuActiveList，2026-10-25 诊断证据）：
+      //   #classObjName      → 课程名（如“25数据科学34”）
+      //   .bottomList>.status → 分组标题（进行中 / 已结束），其后紧邻的 ul 为该组条目
+      //   .bottomList li      → 单个任务/活动行
+      //   .right-content p    → 任务标题（如“普通签到”）；.time → “结束时间：MM-DD HH:mm”
+      //   .tag[class*=icon-]  → 类型图标（icon-signin-g=签到 / icon-xr-g=选人 / icon-tp=通用）
+      taskCourseName: '#classObjName',
+      taskSection: '.bottomList > .status',
+      taskItem: '.bottomList li',
+      taskTitle: '.right-content p, .right-content',
+      taskTypeIcon: '.tag[class*="icon-"]',
+      taskTime: '.time',
+      // 课程注册表（「我的课程」页 mooc2-ans.chaoxing.com/visit/interaction，2026-10-25 诊断证据）：
+      //   #courseList div[id^="c_"] → 课程卡片，id="c_<courseId>"、class 含 stu_<clazzId>
+      //   .course-info h3           → 课程名；.course-info p（末个）→ 教师；中间 p → 班级/学期别名
+      //   .btm-cover                → 「任务点进度: 62/62 100%」（章节学习进度，非作业状态）
+      courseList: '#courseList div[id^="c_"]',
+      courseListFallback: 'div.course[id^="c_"]',
+      courseName: '.course-info h3',
+      courseInfo: '.course-info',
+      courseProgress: '.btm-cover',
     },
     pagination: {
       container: '.el-pagination, .pagination, .page',

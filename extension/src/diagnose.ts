@@ -62,6 +62,9 @@ export interface DiagnosticAssignment {
   // 首页“我的学习任务”结构特有：所属课程与截止时间（本地时间 ISO）。
   courseName?: string;
   dueAt?: string;
+  // 备注（泛雅任务页专用）：承载“截止时间： MM-DD HH:MM”等补充文案，
+  // 便于诊断阶段确认任务页项的截止信息（正式解析器会转成 dueAt）。
+  note?: string;
 }
 
 // 作业列表汇总，如“已完成8/18”。
@@ -92,6 +95,39 @@ export interface DiagnosticExamProbe {
   error: string | null;
 }
 
+// 列表行取证：捕获常见列表容器里每一行的结构（标签/类名/id/data-*/文本/链接/子行文本），
+// 用于还原作业/考试列表的真实 DOM——全局 tree 遍历看不出“哪一层是行、行标识在哪”，
+// 而行级 data-id / data-rid 正是构造稳定 ID 的关键。
+export interface DiagnosticListRow {
+  // 命中该行的采样选择器（便于判断列表用的是哪种结构）。
+  selector: string;
+  tag: string;
+  class?: string;
+  id?: string;
+  data?: Record<string, string>;
+  text?: string;
+  href?: string;
+  childTexts: string[];
+}
+
+// 单个候选内容页的取证结论（由 popup 侧在“开临时标签”取数后回填）。
+// 用于定位“为什么某个标签（作业/考试）诊断不出内容”：是没拼对地址、被重定向到登录页，
+// 还是页面本身只是个空壳（列表在更深一层 iframe 里）。
+export interface DiagnosticCandidateProbe {
+  // 去敏后的候选地址（仅 origin + pathname）。
+  url: string;
+  // 0 = 外壳直接给出的候选；1 = 从候选页里再发现的内嵌 iframe。
+  depth: number;
+  hostname: string;
+  title: string;
+  mainTextLength: number;
+  rowCount: number;
+  adopted: boolean;
+  reason?: string;
+  // 正文前 200 字：一眼分辨“登录页 / 错误页 / 空列表 / 真列表”。
+  textSample?: string;
+}
+
 export interface DiagnosticReport {
   url: string;
   title: string;
@@ -120,6 +156,17 @@ export interface DiagnosticReport {
   classNames: string[];
   anchors: string[];
   tree: DiagnosticNode[];
+  // 外壳主文档内嵌的内容 iframe 完整 URL（任务列表 mobilelearn / 作业·考试列表 mooc1）。
+  // 用于诊断时“开独立标签”定向取证，绕过跨域帧注入时机/权限问题。只在 chaoxing 域收集。
+  contentFrameUrls?: string[];
+  // 列表行取证（见 DiagnosticListRow）：还原列表结构用。
+  listRows?: DiagnosticListRow[];
+  // 候选内容页逐个开标签取证的结论（诊断弹窗侧写入）。
+  // 没有它就只能看到“未取到有效正文”，无法回答“作业/考试为什么诊断不出来”。
+  candidateProbes?: DiagnosticCandidateProbe[];
+  // 当前页面 URL 的查询参数（courseid / clazzid / cpi 等），是构造跨课程稳定 ID 的必需信息。
+  // 长随机令牌（stuenc 之类会话凭证）已脱敏。
+  pageParams?: Record<string, string>;
 }
 
 export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
@@ -206,7 +253,9 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
     'TEMPLATE',
   ]);
 
-  const MAX_DEPTH = 12;
+  // 深度 12 会在「我的课程」页刚好截断到 .course-info（h3 里的 <a> 课程名看不到），
+  // 抬到 14 以便取证时能看到卡片内部真实文本。
+  const MAX_DEPTH = 14;
   const MAX_CHILDREN = 40;
   const MAX_NODES = 2000;
 
@@ -288,6 +337,30 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   const wait = (ms: number): Promise<void> =>
     new Promise((resolve) => window.setTimeout(resolve, ms));
 
+  // 内容 iframe 轮询等待：mobilelearn.chaoxing.com（任务/活动列表）与 mooc1.chaoxing.com
+  // （作业/考试列表）的列表由前端 XHR 异步渲染，注入执行时正文往往尚空。若当前帧正是这两类
+  // 内容帧，则轮询等待其 body 出现任务/状态类文本后再读取，最多 ~6s；超时也不阻塞（仍返回已抓到的）。
+  // 该分支与“外壳主文档”逻辑互斥：外壳（mooc2-ans）不含列表，由点击标签 + 等待负责。
+  const isContentFrame =
+    /(^|\.)mobilelearn\.chaoxing\.com$|(^|\.)mooc1\.chaoxing\.com$/.test(
+      window.location.hostname,
+    );
+  if (isContentFrame) {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      const t = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      if (
+        t.length > 40 &&
+        /(未完成|待批阅|已完成|已退回|重考|进行中|已结束|作业|考试|任务|随堂练习|测验|章节)/.test(
+          t,
+        )
+      ) {
+        break;
+      }
+      await wait(400);
+    }
+  }
+
   // 检测内容区标签（Element UI 的 .el-tabs__item，以及通用 .ant-tabs-tab / [role=tab]）。
   const detectTabs = (): DiagnosticTab[] => {
     const tabs: DiagnosticTab[] = [];
@@ -315,11 +388,13 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
     return items;
   };
 
-  // 主动寻找并点击“作业”类标签：文本以“作业”开头、字数很少、且是叶子或接近叶子的可点击节点。
+  // 主动寻找并点击“作业”类标签：文本以“作业/任务/考试/收件箱/消息/待办”开头、字数很少、且是叶子或接近叶子的可点击节点。
+  // 注意：泛雅课程页左侧菜单的“任务/作业/考试”只是打开“列表页”（查看作业/考试/任务清单），
+  // 并非进入“答题/交卷”页，点击它们安全、不违反“绝不误点考试按钮启动答题”铁律。
   const findAssignmentTab = (): HTMLElement | null => {
     for (const el of Array.from(document.querySelectorAll('*'))) {
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/^(作业|收件箱|消息|未读|待办)/.test(text)) continue;
+      if (!/^(作业|任务|考试|收件箱|消息|未读|待办)/.test(text)) continue;
       if (text.length > 16) continue;
       if (el.children.length > 3) continue;
       if (el.tagName === 'BODY' || el.tagName === 'HTML') continue;
@@ -350,7 +425,7 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   } => {
     // 1) 汇总：已完成 X/Y
     const summaryMatch = text.match(/已完成\s*(\d+)\s*\/\s*(\d+)/);
-    const summary: DiagnosticAssignmentSummary | null = summaryMatch
+    let summary: DiagnosticAssignmentSummary | null = summaryMatch
       ? { done: Number(summaryMatch[1]), total: Number(summaryMatch[2]) }
       : null;
 
@@ -448,6 +523,126 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
       }
     } catch {
       /* 进度条扫描失败不影响主解析 */
+    }
+
+    // 4) 泛雅课程页（mooc1/mooc2-ans.chaoxing.com）的「作业/考试/任务」列表提取。
+    //    仅当东软结构一无所获、且当前域为泛雅课程页（排除收件箱 notice.chaoxing.com）、
+    //    且文本含泛雅特有的状态文案时才启用。这些页面由可见文本直接暴露
+    //    “未完成/待批阅/已完成/已退回/重考/进行中/已结束”等状态，与学习通收件箱
+    //    （只发通知、无提交状态）是两套结构，互不干扰。
+    if (
+      items.length === 0 &&
+      /chaoxing/.test(window.location.hostname) &&
+      !/notice\.chaoxing\.com/.test(window.location.hostname) &&
+      /(未完成|未交|待批阅|已完成|已退回|重考|进行中|已结束)/.test(text)
+    ) {
+      const cItems: DiagnosticAssignment[] = [];
+      // 4a-0) 结构优先：作业/考试列表的实测结构（2026-10-29 真实 DOM 取证）
+      //   .bottomList li > div > div.right-content
+      //              > p.overHidden2.fl  "线代作业4"   ← 标题
+      //              > p.status.fl       "已完成"      ← 状态（每行各一个）
+      // 必须优先于下面的文本正则：正则以「作业/测验」开头匹配，会把标题里的课程前缀吃掉
+      // （「线代测验4」→「测验4」），诊断结论与看板对不上，反而误导判断。
+      const structRows: DiagnosticAssignment[] = [];
+      try {
+        for (const list of Array.from(document.querySelectorAll('.bottomList'))) {
+          for (const li of Array.from(list.querySelectorAll('li'))) {
+            const titleText = (li.querySelector('.overHidden2')?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            const statusText = (li.querySelector('.status')?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (!titleText || !statusText) continue;
+            structRows.push({
+              index: '',
+              title: titleText,
+              remainingAttempts: '-',
+              status: statusText,
+              action: '',
+              submitted: /已完成|已提交|已通过|已批阅/.test(statusText),
+              progress: null,
+              text: redactLongTokens((li.textContent || '').replace(/\s+/g, ' ').trim()).slice(
+                0,
+                260,
+              ),
+            });
+          }
+        }
+      } catch {
+        // 结构读取失败（页面已改版）：退回下面的文本正则。
+      }
+      if (structRows.length > 0) {
+        cItems.push(...structRows);
+      } else {
+        // 4a) 作业/考试列表（正则兜底）：每条 = 类型词 + 标题片段 + 状态文案。
+        //     两个已修复的坑（2026-10-29 实测样本「线代作业3 已过期 线代测验2 已完成」）：
+        //     ① 状态词表缺「已过期」→ 从「作业」一路懒匹配到下一行的「已完成」，
+        //        产出一条 title=「3 已过期 线代测验2」的串行记录；
+        //     ② 跨度只限长度（80 字）不限内容 → 会跨过整条相邻记录。
+        //     现在把状态词补全，并要求跨度内**不得再出现类型词**（下一个“作业/测验/考试”
+        //     一出现就说明已经进了下一条，必须收手）。
+        const statusRe =
+          /(作业|考试|随堂练习|测验|讨论)((?:(?!作业|考试|随堂练习|测验|讨论)[\s\S]){0,80}?)(已完成|未完成|未交|未提交|待批阅|已退回|重考|已过期|已截止)/g;
+        let sm: RegExpExecArray | null;
+        while ((sm = statusRe.exec(text)) !== null) {
+          const rawStatus = sm[3] ?? '';
+          const submitted = rawStatus === '已完成' || rawStatus === '待批阅' || rawStatus === '重考';
+          cItems.push({
+            index: '',
+            // 类型词要留在标题里：只取 (sm[2]) 会得到「3」「4」这种读不出是什么作业的片段。
+            title: `${sm[1] ?? ''}${(sm[2] ?? '').replace(/\s+/g, ' ').trim()}`.slice(0, 120),
+            remainingAttempts: '-',
+            status: rawStatus,
+            action: rawStatus === '重考' ? '重考' : '',
+            submitted,
+            progress: null,
+            text: redactLongTokens(sm[0] ?? '').slice(0, 260),
+          });
+        }
+      }
+      // 4b) 任务页（随堂练习等）：无逐条提交状态文案，按“进行中/已结束”分组标题判定完成——
+      //     进行中=待做，已结束=已完成（按用户拍板：活动窗口结束即视为完成）。
+      const inPos = text.search(/进行中\s*\(/);
+      const endPos = text.search(/已结束\s*\(/);
+      const taskRe = /(随堂练习|作业|任务)([\s\S]{0,120}?)截止时间：\s*([\d-]+\s*[\d:]+)/g;
+      let tm: RegExpExecArray | null;
+      while ((tm = taskRe.exec(text)) !== null) {
+        const itemPos = tm.index ?? 0;
+        const inEnded = endPos >= 0 && itemPos > endPos;
+        const inProgress = endPos < 0 ? inPos >= 0 && itemPos > inPos : inPos >= 0 && itemPos > inPos && itemPos < endPos;
+        const taskStatus = inEnded ? '已结束' : inProgress ? '进行中' : '任务';
+        cItems.push({
+          index: '',
+          title: (tm[2] ?? '').replace(/\s+/g, ' ').trim().slice(0, 120),
+          remainingAttempts: '-',
+          status: taskStatus,
+          action: '',
+          submitted: taskStatus === '已结束',
+          progress: null,
+          text: redactLongTokens(tm[0] ?? '').slice(0, 260),
+          note: `截止 ${tm[3] ?? ''}`,
+        });
+      }
+      if (cItems.length > 0) {
+        items.push(...cItems);
+        // 任务页汇总：已结束(done) / 进行中+已结束(total)。
+        const inN = text.match(/进行中\s*\((\d+)\)/);
+        const endN = text.match(/已结束\s*\((\d+)\)/);
+        if (inN || endN) {
+          const done = endN ? Number(endN[1]) : 0;
+          const total = (inN ? Number(inN[1]) : 0) + done;
+          summary = { done, total };
+        } else if (!summary && structRows.length > 0) {
+          // 作业/考试列表没有「已完成 X/Y」这类汇总文案，但每行都带状态，
+          // 就按行统计一个等价口径（done=已完成，total=总行数）。
+          // 否则诊断的 summary 恒为 null，用户看不出“到底解析出几项、完成几项”。
+          summary = {
+            done: structRows.filter((r) => r.submitted).length,
+            total: structRows.length,
+          };
+        }
+      }
     }
 
     return { items, summary, progressBars };
@@ -755,8 +950,9 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   const beforeTabs = detectTabs();
 
   // 3) 主动点击“作业”标签（若存在且未激活），等待渲染。
+  //    内容 iframe（mobilelearn/mooc1）已是列表页，无需、也不应再点内部标签，直接跳过。
   let clickedAssignmentTab = false;
-  const tab = findAssignmentTab();
+  const tab = isContentFrame ? null : findAssignmentTab();
   if (tab) {
     try {
       tab.click();
@@ -831,7 +1027,111 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
   const parsed = extractAssignments(mainText);
 
   // 7) 学习通页面附加：考试详情抓取探测（端到端验证 fetch+解析链路）。
-  const examProbe = await probeExamDetail();
+  //    内容 iframe（mobilelearn/mooc1）已是课程内列表页，不需要、也不做收件箱式考试详情探测。
+  const examProbe = isContentFrame ? null : await probeExamDetail();
+
+  // 收集候选内容页 URL（任务列表 mobilelearn / 作业·考试列表 mooc1），供诊断“开独立标签”定向取证。
+  // ① 已存在的内容 iframe src（点过的标签）；
+  // ② 左侧菜单 a[data-url]（未点过的标签，iframe 尚未创建）——补上外壳 URL 里缺的查询参数
+  //    （courseid/clazzid/cpi/stuenc…），这与外壳点击标签时生成的 iframe 地址等价，
+  //    因此无需先手动点开「作业」「考试」标签也能直接取证。
+  // 合并参数必须“只补缺失的键”。反例（2026-10-29 修的 bug）：
+  // `du + shellQuery` 在 data-url 已带 `?courseId=…` 时会拼出两个 `?`，参数被截断 →
+  // 作业/考试列表页打开就是空壳或错误页，表现为“只有任务能诊断出来”。
+  const mergeFrameQuery = (base: string, extraQuery: string): string => {
+    try {
+      const u = new URL(base, window.location.href);
+      const extra = new URLSearchParams(extraQuery);
+      extra.forEach((v, k) => {
+        if (!u.searchParams.has(k)) u.searchParams.set(k, v);
+      });
+      return u.toString();
+    } catch {
+      return base;
+    }
+  };
+
+  let contentFrameUrls: string[] = [];
+  if (!isContentFrame) {
+    try {
+      const shellQuery = window.location.search || '';
+      const push = (u: string): void => {
+        const v = (u || '').trim();
+        if (!v || contentFrameUrls.includes(v)) return;
+        contentFrameUrls.push(v);
+      };
+      for (const f of Array.from(document.querySelectorAll('iframe'))) {
+        const src = (f.getAttribute('src') || '').trim();
+        if (/mobilelearn\.chaoxing\.com|mooc1\.chaoxing\.com/.test(src)) {
+          push(mergeFrameQuery(src, shellQuery));
+        }
+      }
+      for (const a of Array.from(document.querySelectorAll('a[data-url]'))) {
+        const du = (a.getAttribute('data-url') || '').trim();
+        if (/mobilelearn\.chaoxing\.com|mooc1\.chaoxing\.com/.test(du)) {
+          push(mergeFrameQuery(du, shellQuery));
+        }
+      }
+    } catch {
+      /* 读取 iframe src / data-url 失败不影响主流程 */
+    }
+  }
+
+  // 列表行取证：按常见列表结构采样行，保留行级标识（id / data-*）与子行文本分布。
+  let listRows: DiagnosticListRow[] = [];
+  try {
+    const LIST_ROW_SELECTORS = [
+      '.bottomList li',
+      'li.dataBody_item',
+      '.course-list li',
+      'ul[class*="list"] li',
+      '.el-table__row',
+      'tr',
+      '[data-id]',
+      '[data-rid]',
+    ];
+    for (const sel of LIST_ROW_SELECTORS) {
+      const rows = Array.from(document.querySelectorAll(sel)).slice(0, 12);
+      for (const row of rows) {
+        const data: Record<string, string> = {};
+        for (const attr of Array.from(row.attributes)) {
+          if (attr.name.startsWith('data-') && attr.value) {
+            data[attr.name] = redactText(attr.value);
+          }
+        }
+        const childTexts: string[] = [];
+        for (const c of Array.from(row.children).slice(0, 8)) {
+          const t = (c.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+          if (t) childTexts.push(t);
+        }
+        const href = row.getAttribute('href') || row.querySelector('a')?.getAttribute('href') || '';
+        listRows.push({
+          selector: sel,
+          tag: row.tagName.toLowerCase(),
+          class:
+            typeof row.className === 'string' && row.className ? row.className.slice(0, 120) : undefined,
+          id: row.id ? row.id.slice(0, 60) : undefined,
+          data: Object.keys(data).length ? data : undefined,
+          text: (row.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200) || undefined,
+          href: href ? href.slice(0, 200) : undefined,
+          childTexts,
+        });
+      }
+      if (listRows.length >= 40) break;
+    }
+  } catch {
+    /* 列表取证失败不影响主流程 */
+  }
+
+  // 页面查询参数（courseid / clazzid / cpi 用于构成稳定 ID；会话类长令牌脱敏）。
+  let pageParams: Record<string, string> = {};
+  try {
+    new URL(window.location.href).searchParams.forEach((v, k) => {
+      pageParams[k] = isLongToken(v) ? '[已脱敏-长随机串]' : v.slice(0, 80);
+    });
+  } catch {
+    /* URL 解析失败则留空 */
+  }
 
   return {
     url: safePageUrl(),
@@ -850,5 +1150,8 @@ export async function collectPageDiagnostic(): Promise<DiagnosticReport> {
     classNames: [...classNames].sort(),
     anchors: [...new Set(anchors)].sort(),
     tree,
+    contentFrameUrls,
+    listRows,
+    pageParams,
   };
 }

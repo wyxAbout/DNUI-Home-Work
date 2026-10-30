@@ -57,7 +57,8 @@
 //      结论：本模块以“注意时间”作为自动化信号（窗口内=待做，窗口外=已过期并隐藏）；
 //      “交卷成功”需用户手动在平台确认，无法由扩展静默判定。
 
-import type { Assignment, PlatformExtractionResult } from './models';
+import { assignmentStatusLabel } from './models.ts';
+import type { Assignment, ChaoxingCourse, PlatformExtractionResult } from './models';
 import { slugifyCourse } from './neusoft.ts';
 import { PLATFORM_SELECTOR_CONFIG, SelectorError } from './selectors.ts';
 
@@ -521,6 +522,369 @@ async function readNoticeDetailText(doc: Document, url: string): Promise<string 
   }
 }
 
+// ============ 任务/活动列表（mobilelearn.chaoxing.com/page/active/stuActiveList） ============
+// 证据（2026-10-25 用户贴回的诊断 JSON，顶层文档直接诊断）：
+//   - 课程名：h2#classObjName 文本（如“25数据科学34”）。
+//   - 课程标识：URL 查询参数 courseid / clazzid（稳定，用于构成稳定 ID 与课程分组）。
+//   - 分组：.bottomList 内顺序出现 .status 分组标题（进行中 / 已结束），其后紧邻的 ul 为该组条目；
+//     分组标题形如“进行中（0）”“已结束（15）”，括号内为计数。
+//   - 单条 li：.right-content p（任务标题，如“普通签到”）/ .time（结束时间：MM-DD HH:mm）/
+//     .tag[class*=icon-]（类型图标：icon-signin-g=签到、icon-xr-g=选人、icon-tp=通用）。
+//   - 判定规则（用户 2026-10-25 判定表）：任务页“仅 已结束 且无提交状态” → 已完成、看板默认隐藏；
+//     “进行中” → 看板显示“进行中”。
+
+// 任务/活动类型图标 → 中文标签（仅基于已有诊断证据，不臆测未出现的图标语义）。
+const CHAOXING_TASK_TYPE_ICONS: Record<string, string> = {
+  'icon-signin-g': '签到',
+  'icon-xr-g': '选人',
+  // 2026-10-25 实证：任务页会聚合「作业/测验」（不只是活动），对应图标为 icon-cy-g，
+  // 其条目标题实证形如「10.19日作业：…提交学习通作业」。图标语义未 100% 锁定，
+  // 故用中性词，不臆测为「测验」；该标签会影响稳定 id（类型参与哈希）。
+  'icon-cy-g': '作业或测验',
+  'icon-tp': '任务',
+};
+
+// 纯函数：从类型图标 class 推断活动类型。优先取“具体类型”图标（非通用 icon-tp）。
+export function mapChaoxingTaskTypeIcon(classes: string): string {
+  const list = (classes || '').split(/\s+/).filter(Boolean);
+  for (const c of list) {
+    if (c !== 'icon-tp' && c.startsWith('icon-') && c.endsWith('-g') && CHAOXING_TASK_TYPE_ICONS[c]) {
+      return CHAOXING_TASK_TYPE_ICONS[c]!;
+    }
+  }
+  if (list.includes('icon-tp')) return CHAOXING_TASK_TYPE_ICONS['icon-tp']!;
+  const m = list.find((c) => c.startsWith('icon-'));
+  if (m) return m.replace(/^icon-/, '').replace(/-g$/, '');
+  return '其它';
+}
+
+// 纯函数：把“结束时间：05-20 08:06”（无年份）归一为本地 ISO；yearless 用当前年补齐，
+// 若 isEnded 且补齐后晚于 now，则回退到前一年（取最近一次过去时间，避免把已结束项误判到未来）。
+export function normalizeChaoxingTaskDeadline(
+  raw: string,
+  options?: { nowMs?: number; isEnded?: boolean },
+): string | null {
+  const m = (raw || '').match(/(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const nowMs = options?.nowMs ?? Date.now();
+  const baseYear = new Date(nowMs).getFullYear();
+  const iso = (year: number): string => `${year}-${m[1]}-${m[2]}T${m[3]}:${m[4]}`;
+  let result = iso(baseYear);
+  if (options?.isEnded) {
+    const t = new Date(result).getTime();
+    if (!Number.isNaN(t) && t > nowMs) {
+      result = iso(baseYear - 1);
+    }
+  }
+  return result;
+}
+
+export interface RawChaoxingTaskItem {
+  title: string;
+  type: string; // 签到/选人/任务/其它
+  deadlineText: string; // 原始“结束时间：…”文本
+  dueAt: string | null;
+  section: '进行中' | '已结束';
+}
+
+// 纯函数：从任务/活动列表 DOM 抽取结构化原始项（不含映射副作用，便于单测）。
+// 返回 null 表示页面不是任务列表（无 .bottomList 或无法解析课程标识）。
+export function parseChaoxingTaskListDom(
+  doc: Document,
+  url: string,
+  nowMs = Date.now(),
+): { courseId: string; courseName: string; items: RawChaoxingTaskItem[] } | null {
+  const courseNameEl = doc.querySelector(chaoxingCfg.fields.taskCourseName ?? '#classObjName');
+  const courseName = (courseNameEl?.textContent || '').replace(/\s+/g, ' ').trim();
+  let courseid = '';
+  let clazzid = '';
+  try {
+    const params = new URL(url).searchParams;
+    courseid = params.get('courseid') || '';
+    clazzid = params.get('clazzid') || '';
+  } catch {
+    /* URL 异常则退化为仅用课程名分组 */
+  }
+  const courseId = courseid && clazzid ? `${courseid}-${clazzid}` : courseName ? slugifyCourse(courseName) : '';
+  if (!courseId) return null;
+
+  const bottom = doc.querySelector('.bottomList');
+  if (!bottom) return null;
+
+  const items: RawChaoxingTaskItem[] = [];
+  let section: '进行中' | '已结束' = '进行中';
+
+  const readItem = (li: Element): void => {
+    const title = (
+      li.querySelector(chaoxingCfg.fields.taskTitle ?? '.right-content p, .right-content')?.textContent ||
+      ''
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!title) return;
+    const iconClasses = (
+      Array.from(li.querySelectorAll(chaoxingCfg.fields.taskTypeIcon ?? '.tag[class*="icon-"]')) as Element[]
+    )
+      .map((e) => (typeof e.className === 'string' ? e.className : ''))
+      .join(' ');
+    const type = mapChaoxingTaskTypeIcon(iconClasses);
+    const deadlineText = (li.querySelector(chaoxingCfg.fields.taskTime ?? '.time')?.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const dueAt = normalizeChaoxingTaskDeadline(deadlineText, { nowMs, isEnded: section === '已结束' });
+    items.push({ title, type, deadlineText, dueAt, section });
+  };
+
+  // 按**文档顺序**递归遍历，不对层级做任何假设。
+  // 原实现只认 `.bottomList` 的直接子 ul：平台一旦多包一层（`.bottomList > div > ul`），
+  // 就一行都收不到却仍返回 success —— 表现为任务页永久「成功 · 0 条」。
+  // 2026-10-29 复测 6 门课任务页全 0 条，而诊断侧用 `.bottomList li`（后代选择器）
+  // 明明拿到 12 行，就是这个层级假设造成的。
+  // 同时把分组判定也改成“顺序上最近的那个 .status”：只放宽容器、不动分组的话，
+  // 分组头一旦不在直接子层，全部条目都会被归进第一个分组（15 条已结束变成 15 条待办），更糟。
+  const walk = (el: Element): void => {
+    for (const child of Array.from(el.children)) {
+      const tag = child.tagName;
+      if (tag === 'LI') {
+        readItem(child);
+        // 不再下钻：li 内部的 .status 是条目自己的状态，不是分组头。
+        continue;
+      }
+      const cls = typeof child.className === 'string' ? child.className : '';
+      if (cls.includes('status')) {
+        const name = (child.textContent || '')
+          .replace(/\s+/g, ' ')
+          .replace(/（\d+）|\(\d+\)/g, '')
+          .trim();
+        section = name.includes('已结束') ? '已结束' : '进行中';
+      }
+      walk(child);
+    }
+  };
+  walk(bottom);
+  return { courseId, courseName, items };
+}
+
+// 任务项稳定键（用于构成 Assignment.id，避免同名活动不同截止时间被误合并）。
+// 刻意**不含 section（进行中/已结束）**：同一条活动会随截止时间推进从「进行中」滑到「已结束」，
+// 那只是状态变化、不是另一条活动。若把分组算进哈希，状态一变 ID 就变，
+// 看板会出现「同一活动既在进行中又已完成」的两条记录。状态由 status 字段表达。
+function hashTaskItem(it: RawChaoxingTaskItem): string {
+  const s = `${it.type}|${it.title}|${it.deadlineText}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+// 纯函数：把原始任务项映射为 Assignment[]。
+// - 进行中 → status='in_progress'（看板“进行中”）。
+// - 已结束（无提交状态）→ status='ended'（看板“已完成”，默认隐藏，符合判定表）。
+// 标题带截止时间以区分同名活动；id 含稳定哈希。
+export function mapChaoxingTaskAssignments(
+  items: RawChaoxingTaskItem[],
+  ctx: { courseId: string; courseName: string; syncedAt: string; nowMs: number; url: string },
+): Assignment[] {
+  return items.map((it) => {
+    const isEnded = it.section === '已结束';
+    const status: Assignment['status'] = isEnded ? 'ended' : 'in_progress';
+    const shortDeadline = (it.deadlineText || '').replace(/^结束时间[:：]\s*/, '').trim() || '无截止';
+    return {
+      id: `chaoxing:${ctx.courseId}:task:${hashTaskItem(it)}`,
+      platformId: 'chaoxing',
+      courseId: slugifyCourse(ctx.courseName || '学习通任务'),
+      courseName: ctx.courseName || '学习通任务',
+      title: `${it.type}·${it.title}（${shortDeadline}）`,
+      dueAt: it.dueAt,
+      url: ctx.url,
+      status,
+      syncedAt: ctx.syncedAt,
+      source: 'course',
+    };
+  });
+}
+
+// 任务/活动列表的解析编排（含渲染等待与结果封装）。
+async function extractChaoxingTaskListResult(
+  doc: Document,
+  url: string,
+  options: ChaoxingExtractOptions,
+): Promise<PlatformExtractionResult> {
+  const ready = (): boolean => !!doc.querySelector('.bottomList li') || !!doc.querySelector('.null-data');
+  if (!ready()) {
+    // 被动上报（逐课抓取 / 用户打开页面）也要等够：该列表是 XHR 异步渲染，
+    // 3s 在慢网络下不够，会把一次本可成功的抓取判成“未渲染”。
+    // waitFor 是轮询式的——一旦就绪立即返回，所以调大只在“真的慢”时才多等。
+    await waitFor(ready, options.allowAutoOpen ? 8000 : 6000, 250);
+  }
+  const parsed = parseChaoxingTaskListDom(doc, url, Date.now());
+  if (!parsed) {
+    throw new SelectorError('chaoxing', '.bottomList, #classObjName', '任务列表未渲染或缺少课程标识');
+  }
+  // 有行、却一条都认不出来：层级或文案可能又变了，必须硬失败。
+  // 若返回 success + 空列表，后台会把它当成“教师把活动全删了”，按课程作用域清空任务项；
+  // 而 2026-10-29 的真实事故是反过来的——解析器只认直接子 ul，多包一层就静默给出 0 条。
+  const rowCount = doc.querySelectorAll('.bottomList li').length;
+  if (rowCount > 0 && parsed.items.length === 0) {
+    throw new SelectorError(
+      'chaoxing',
+      '.bottomList li, .right-content',
+      `任务列表有 ${rowCount} 行，但一条都识别不出来（可能已改版）`,
+    );
+  }
+  const syncedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const assignments = mapChaoxingTaskAssignments(parsed.items, {
+    courseId: parsed.courseId,
+    courseName: parsed.courseName,
+    syncedAt,
+    nowMs,
+    url,
+  });
+  // 单课程范围合并：不 replaceAll，避免清掉其它课程 / 收件箱的数据。
+  // 注意两个 ID 的分工（当前阶段 A“课程注册表”尚未落地，先保证不丢数据）：
+  //   - assignment.courseId 用“课程名 slug”，与收件箱路径一致 —— 同一门课在看板里只出现一个分组；
+  //   - 合并作用域 courseIds 用稳定的 `courseid-clazzid`，不会误清收件箱里同课程的作业通知；
+  //   - 作业项 id 用 `chaoxing:<courseid-clazzid>:task:<hash>`，跨会话稳定、可安全去重。
+  // 遗留：教师删除活动后旧项不会自动消失（作用域不覆盖课程名分组），待阶段 A 统一 ID 后修复。
+  if (assignments.length === 0) {
+    return {
+      status: 'success',
+      assignments: [],
+      message: `学习通任务列表「${parsed.courseName}」：无任务项。`,
+      courseIds: [parsed.courseId],
+    };
+  }
+  const inProgress = assignments.filter((a) => a.status === 'in_progress').length;
+  const ended = assignments.length - inProgress;
+  return {
+    status: 'success',
+    assignments,
+    message: `学习通任务列表「${parsed.courseName}」：${assignments.length} 项（${inProgress} 项进行中，${ended} 项已结束默认隐藏）。`,
+    courseIds: [parsed.courseId],
+  };
+}
+
+// ============ 课程注册表（「我的课程」页，阶段 A） ============
+// 证据（2026-10-25 用户贴回的诊断 JSON，mooc2-ans.chaoxing.com/visit/interaction）：
+//   div#courseList.course-list > div#stuNormalCourseListDiv
+//     └─ div.course.clearfix.learnCourse.stu_<clazzId>  且 id="c_<courseId>"
+//   实测 6 门课；「线性代数」= id="c_259363438" + class 含 stu_139380153，
+//   与其课程页 / 任务列表 URL 的 courseid=259363438&clazzid=139380153 **完全一致**（已交叉验证）。
+//   .course-info：h3 → 课程名；p.line2.color3 → 教师；p.margint10.line2.color2 → 班级/学期别名（可缺）。
+//   .btm-cover（在 .course-cover 内，故文本上出现在课程名之前）：「任务点进度: 62/62 100%」。
+//   ⚠️ 任务点进度 = 章节视频学习进度，**不是**作业/考试提交状态，只作参考展示，不参与判定。
+
+// 纯函数：id="c_259363438" → "259363438"。
+export function parseChaoxingCourseId(rawId: string): string {
+  const m = (rawId || '').match(/^c_(\d+)$/);
+  return m ? m[1]! : '';
+}
+
+// 纯函数：class 中的 stu_139380153 → "139380153"。
+export function parseChaoxingClazzId(className: string): string {
+  const m = (className || '').split(/\s+/).find((c) => /^stu_\d+$/.test(c));
+  return m ? m.replace(/^stu_/, '') : '';
+}
+
+// 纯函数：「任务点进度: 62/62 100%」→ { done: 62, total: 62 }。无法识别返回 null。
+export function parseChaoxingProgress(text: string): { done: number; total: number } | null {
+  const m = (text || '').replace(/\s+/g, ' ').match(/(\d+)\s*\/\s*(\d+)/);
+  if (!m) return null;
+  return { done: Number(m[1]), total: Number(m[2]) };
+}
+
+function cleanText(value: string | null | undefined): string {
+  return (value || '').replace(/\s+/g, ' ').trim();
+}
+
+// 从「我的课程」页抽取课程注册表。返回空数组表示没有解析到课程卡片（调用方据此报错）。
+export function parseChaoxingCourseListDom(doc: Document, syncedAt: string): ChaoxingCourse[] {
+  const primary = chaoxingCfg.fields.courseList ?? '#courseList div[id^="c_"]';
+  let cards = Array.from(doc.querySelectorAll(primary));
+  if (cards.length === 0) {
+    const fallback = chaoxingCfg.fields.courseListFallback ?? 'div.course[id^="c_"]';
+    cards = Array.from(doc.querySelectorAll(fallback));
+  }
+
+  const courses: ChaoxingCourse[] = [];
+  const seen = new Set<string>();
+  for (const card of cards) {
+    const courseId = parseChaoxingCourseId(card.id || '');
+    const clazzId = parseChaoxingClazzId(typeof card.className === 'string' ? card.className : '');
+    // 两个 ID 缺一不可：只有 courseId 无法定位教学班，只有 clazzId 无法跨入口归并。
+    if (!courseId || !clazzId) continue;
+    const key = `${courseId}-${clazzId}`;
+    if (seen.has(key)) continue;
+
+    // 课程名：优先 .course-info h3。实测课程名可能嵌在 h3 的子元素（如 <a>）里，
+    // textContent 已能取到；再回退到 h3 内链接 / .course-info 内链接，避免整张卡片被跳过。
+    const nameEl = card.querySelector(chaoxingCfg.fields.courseName ?? '.course-info h3');
+    const name =
+      cleanText(nameEl?.textContent) ||
+      cleanText(nameEl?.querySelector('a')?.textContent) ||
+      cleanText(card.querySelector('.course-info a')?.textContent);
+    // 课程名取不到时不臆造：该卡片直接跳过（宁可漏，也不要出现“未知课程”占位项）。
+    if (!name) continue;
+    seen.add(key);
+
+    // 教师优先取 color3 样式的 p（实测稳定），取不到时退回最后一个非空 p。
+    const paragraphs = Array.from(card.querySelectorAll('.course-info p'));
+    const teacherEl =
+      paragraphs.find((p) => (typeof p.className === 'string' ? p.className : '').includes('color3')) ??
+      [...paragraphs].reverse().find((p) => cleanText(p.textContent));
+    const teacher = cleanText(teacherEl?.textContent);
+    const aliasEl = paragraphs.find(
+      (p) => p !== teacherEl && !/任务点进度/.test(cleanText(p.textContent)) && cleanText(p.textContent),
+    );
+    const alias = cleanText(aliasEl?.textContent) || undefined;
+
+    const progressText =
+      cleanText(card.querySelector(chaoxingCfg.fields.courseProgress ?? '.btm-cover')?.textContent) ||
+      undefined;
+    const progress = progressText ? parseChaoxingProgress(progressText) : null;
+
+    courses.push({
+      courseId,
+      clazzId,
+      name,
+      teacher,
+      alias,
+      progressText,
+      progressDone: progress?.done,
+      progressTotal: progress?.total,
+      syncedAt,
+    });
+  }
+  return courses;
+}
+
+// 课程注册表解析编排（含渲染等待与结果封装）。
+// 注意：本页**不产出作业**（作业状态必须进课程页列表读），故 assignments 恒为空、
+// 也不给 courseIds —— 后台合并时作用域为空会原样保留现有作业，不会误清。
+async function extractChaoxingCourseRegistryResult(
+  doc: Document,
+  options: ChaoxingExtractOptions,
+): Promise<PlatformExtractionResult> {
+  const ready = (): boolean =>
+    doc.querySelectorAll('#courseList div[id^="c_"]').length > 0 ||
+    !!doc.querySelector('#courseList .null-data');
+  if (!ready()) {
+    await waitFor(ready, options.allowAutoOpen ? 6000 : 3000, 250);
+  }
+  const courses = parseChaoxingCourseListDom(doc, new Date().toISOString());
+  if (courses.length === 0) {
+    throw new SelectorError('chaoxing', '#courseList div[id^="c_"]', '「我的课程」页未渲染出课程卡片');
+  }
+  return {
+    status: 'success',
+    assignments: [],
+    message: `学习通课程注册表：已收录 ${courses.length} 门课（courseId+clazzId）。作业/考试/任务的提交状态仍需进入各课程页读取。`,
+    courses,
+  };
+}
+
 export async function extractChaoxingAssignments(
   doc: Document,
   url: string,
@@ -533,6 +897,7 @@ export async function extractChaoxingAssignments(
     return null;
   }
   const hostname = parsedUrl.hostname;
+  const path = parsedUrl.pathname;
 
   // 仅处理学习通域；非学习通直接跳过（platforms.ts 已按 host 过滤，此处双保险）。
   if (hostname && !/(^|\.)chaoxing\.com$/.test(hostname)) {
@@ -545,9 +910,46 @@ export async function extractChaoxingAssignments(
     return null;
   }
 
+  // 「我的课程」页（阶段 A 课程注册表）：mooc2-ans/visit/interaction 或 mooc1/visit/stucoursemiddle。
+  // 该页只枚举课程（courseId + clazzId + 课程名 + 教师），不产出作业状态。
+  if (path.includes('/visit/interaction') || path.includes('stucoursemiddle')) {
+    return extractChaoxingCourseRegistryResult(doc, options);
+  }
+
+  // 顶层 mooc2-ans 课程页外壳：真实任务/作业/考试列表在跨域 iframe（mobilelearn/mooc1），
+  // 本页无作业 DOM，返回 null，由内容 iframe 自行解析。
+  if (hostname === 'mooc2-ans.chaoxing.com') {
+    return null;
+  }
+
+  // 任务/活动列表（mobilelearn.chaoxing.com/page/active/stuActiveList，2026-10-25 取证）。
+  if (hostname === 'mobilelearn.chaoxing.com' && path.includes('stuActiveList')) {
+    return extractChaoxingTaskListResult(doc, url, options);
+  }
+
+  // 作业列表 / 考试列表（mooc1.chaoxing.com/mooc2/work/list、exam-ans/mooc2/exam/exam-list）。
+  // 尚未取证诊断，暂以 needs-verification 显式提示（不静默清空、不误报成功）；
+  // 待用户分别诊断「作业」「考试」标签取证后落地（见 学习通任务完成判定规则.md）。
+  // 作业 / 考试列表（exam-ans/mooc2/exam/exam-list，2026-10-29 已取证并落地解析）。
+  // 该页是「作业 + 测验 + 课堂活动」混合列表，是作业进看板的唯一来源。
+  if (path.includes('exam-list')) {
+    return extractChaoxingExamListResult(doc, url, options);
+  }
+
+  // mooc2/work/list：实测（2026-10-29）打开只有「提示」弹窗、正文 0 字、0 行，取不到任何列表；
+  // 而作业在 exam-list 里已全部覆盖，故本条路径不再抓取，但仍保留显式说明，避免被误当成解析失败。
+  if (path.includes('work/list')) {
+    return {
+      status: 'needs-verification',
+      assignments: [],
+      message:
+        '学习通 mooc2/work/list 打开后无可读列表（实测只有弹窗）。作业已由「考试列表」页覆盖，本页可忽略。',
+    };
+  }
+
   // notice.chaoxing.com 下仅收件箱列表页（/pc/notice/myNotice）具备解析权；
   // 其它页面（如单条通知详情）没有列表 DOM，若按“0 条”处理会整组清空缓存，必须返回 null。
-  if (!parsedUrl.pathname.includes('myNotice')) {
+  if (!path.includes('myNotice')) {
     return null;
   }
 
@@ -637,5 +1039,228 @@ export async function extractChaoxingAssignments(
     assignments,
     message: `学习通邮箱：作业 ${homeworkItems.length} 项、考试 ${examItems.length} 项（其中 ${pendingCount} 项待处理）。`,
     replaceAll: true,
+  };
+}
+
+// ============================================================================
+// 作业 / 考试列表（mooc1.chaoxing.com/exam-ans/mooc2/exam/exam-list）
+//
+// 2026-10-29 诊断取证（真实 DOM + 真实 URL），两个反直觉结论：
+//   1) 该页标题虽叫「考试列表」，实际是**作业 + 测验 + 课堂活动**的混合列表——
+//      「线代作业1..4 / 线代测验1..4 / 课堂学习活动（第三章）」全在里面，图标统一为
+//      `icon-exam-g`（无法靠图标区分类型，只能从标题推断）。
+//      因此**不需要** mooc2/work/list：实测打开它只有「提示」弹窗、正文 0 字、0 行。
+//   2) 该页**不显示截止时间**（任务页有「结束时间：MM-DD HH:MM」，这里没有）。
+//      所以 dueAt 一律 null，标题也不拼时间；排序由调用方按 syncedAt/status 处理。
+//
+// 实测每行结构（与任务页不同，照抄任务页解析器会踩两个坑）：
+//   li > div > div.right-content
+//          > p.overHidden2.fl   "线代作业4"    ← 标题
+//          > p.status.fl        "已完成"       ← 状态（**每行各一个**）
+// 坑①：没有「进行中/已结束」分组，状态不在 .bottomList 的直接子 div 上，而在每个 li 内部；
+//      任务页那套「遍历 .bottomList 子元素、遇 .status 就切 section」在这里会读到 0 条。
+// 坑②：`p.status` 有两个 p 兄弟（标题 p 与状态 p），取 .right-content p 的第一个会把状态当标题。
+// ============================================================================
+
+// 纯函数：把作业/考试列表的原始状态文案映射到统一状态枚举。
+// 认不出的返回 null —— 由调用方计入“未识别行”，绝不猜成已完成（猜错会把待办隐藏掉）。
+export function mapChaoxingExamStatus(raw: string): Assignment['status'] | null {
+  const s = (raw || '').replace(/\s+/g, '').trim();
+  if (!s) return null;
+  // 顺序有讲究：先判「退回」「过期」这类复合语义，再判「已完成」。
+  if (/已退回|需重交|重交|打回|不通过/.test(s)) return 'returned';
+  if (/已过期|已截止|已结束|已关闭|已失效/.test(s)) return 'expired';
+  if (/待批阅|批阅中|待评|待评分|评阅中/.test(s)) return 'submitted';
+  if (/可重考|重考|可重做/.test(s)) return 'retake';
+  if (/未完成|未提交|未交|待完成|未参与|去完成|未开始/.test(s)) return 'unsubmitted';
+  if (/已完成|已提交|已交|已通过|已批阅/.test(s)) return 'completed';
+  if (/进行中|进行|已开始/.test(s)) return 'in_progress';
+  return null;
+}
+
+// 纯函数：该列表的图标全一样，类型只能从标题推断（用于看板标签与 id 哈希）。
+export function inferChaoxingExamType(title: string): string {
+  const t = (title || '').trim();
+  if (!t) return '其它';
+  if (/考试|期末|期中|补考|重修考试/.test(t)) return '考试';
+  if (/测验|测试|小测|自测/.test(t)) return '测验';
+  if (/作业/.test(t)) return '作业';
+  if (/课堂学习活动|课堂活动/.test(t)) return '课堂活动';
+  if (/实验/.test(t)) return '实验';
+  if (/讨论/.test(t)) return '讨论';
+  return '其它';
+}
+
+export interface RawChaoxingExamItem {
+  title: string;
+  type: string; // 作业/测验/考试/课堂活动/实验/讨论/其它
+  statusText: string; // 原始状态文案（已完成 / 已过期 …）
+  status: Assignment['status'];
+}
+
+// 纯函数：从作业/考试列表 DOM 抽取结构化原始项（无副作用，便于单测）。
+// 返回 null 表示页面不是该列表（无 .bottomList / 无法解析课程标识）。
+export function parseChaoxingExamListDom(
+  doc: Document,
+  url: string,
+): {
+  courseId: string;
+  courseName: string;
+  items: RawChaoxingExamItem[];
+  // 有列表行但状态/标题取不到的行数：>0 且 items 为空说明选择器可能已改版，调用方必须硬失败。
+  unparsedRows: number;
+} | null {
+  // 课程名：任务页是 #classObjName；本页只有 .top-back > h2（无 id），故按序兜底。
+  const courseNameEl = doc.querySelector('#classObjName, .top-back h2, .top-back');
+  const courseName = (courseNameEl?.textContent || '').replace(/\s+/g, ' ').trim();
+
+  let courseid = '';
+  let clazzid = '';
+  try {
+    const params = new URL(url).searchParams;
+    // 该页实测参数是小写 courseid/clazzid；大小写两种都兼容（不同入口会互相不一致）。
+    courseid = (params.get('courseid') || params.get('courseId') || '').trim();
+    clazzid = (params.get('clazzid') || params.get('classId') || '').trim();
+  } catch {
+    /* URL 异常则退化为仅用课程名分组 */
+  }
+  const courseId =
+    courseid && clazzid ? `${courseid}-${clazzid}` : courseName ? slugifyCourse(courseName) : '';
+  if (!courseId) return null;
+
+  const bottom = doc.querySelector('.bottomList');
+  if (!bottom) {
+    // 空态页：平台在「本课程没有作业/考试」时只渲染 .null-data，不渲染 .bottomList。
+    // 这是**有效结论（0 条）**，不是解析失败——否则一门本来就没布置作业的课会永远报
+    // “列表未渲染”，用户只会以为扩展坏了（2026-10-29 实测就有一门课卡在这里）。
+    // 但仍要求有课程标识：空态下凭空返回 0 条，会按错误作用域把别的课缓存清掉。
+    if (doc.querySelector('.null-data')) {
+      return { courseId, courseName, items: [], unparsedRows: 0 };
+    }
+    return null;
+  }
+
+  const items: RawChaoxingExamItem[] = [];
+  let unparsedRows = 0;
+  for (const li of Array.from(bottom.querySelectorAll('li'))) {
+    // 标题固定是 .overHidden2（超长两行截断的那个 p）；状态是它兄弟 .status。
+    const titleEl = li.querySelector('.right-content .overHidden2, .overHidden2');
+    const statusEl = li.querySelector('.right-content .status, .status');
+    const title = (titleEl?.textContent || '').replace(/\s+/g, ' ').trim();
+    const statusText = (statusEl?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!title || !statusText) {
+      unparsedRows += 1;
+      continue;
+    }
+    const status = mapChaoxingExamStatus(statusText);
+    if (!status) {
+      unparsedRows += 1;
+      continue;
+    }
+    items.push({ title, type: inferChaoxingExamType(title), statusText, status });
+  }
+  return { courseId, courseName, items, unparsedRows };
+}
+
+// 作业/考试项稳定键（构成 Assignment.id）。
+// 刻意**不含 status**：状态会从「未完成」→「已完成」/「已过期」迁移，那只是状态变化，
+// 不是另一条作业。含状态会让同一条作业在看板上裂成两条（与任务页 hashTaskItem 同一教训）。
+// 本页无截止时间，只能靠 type|title 做身份；跨学期同门课 courseId 不同，不会撞。
+function hashExamItem(it: RawChaoxingExamItem): string {
+  const s = `${it.type}|${it.title}`;
+  let h = 5381;
+  for (let i = 0; i < s.length; i += 1) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
+}
+
+// 纯函数：把原始项映射为 Assignment[]。
+// - assignment.courseId 用课程名 slug：与收件箱通知、任务页同源，保证一门课在看板只有一个分组；
+// - 合并作用域用稳定的 `courseid-clazzid`（由调用方传 courseIds），两者分工见 extract 里的注释；
+// - dueAt 为 null：该页不显示截止时间（真实限制，不臆造）。
+export function mapChaoxingExamAssignments(
+  items: RawChaoxingExamItem[],
+  ctx: { courseId: string; courseName: string; syncedAt: string; url: string },
+): Assignment[] {
+  const groupName = ctx.courseName || '学习通作业';
+  return items.map((it) => ({
+    id: `chaoxing:${ctx.courseId}:exam:${hashExamItem(it)}`,
+    platformId: 'chaoxing',
+    courseId: slugifyCourse(groupName),
+    courseName: groupName,
+    title: `${it.type}·${it.title}`,
+    dueAt: null,
+    url: ctx.url,
+    status: it.status,
+    syncedAt: ctx.syncedAt,
+    source: 'course',
+  }));
+}
+
+// 作业/考试列表的解析编排（渲染等待 + 结果封装）。
+async function extractChaoxingExamListResult(
+  doc: Document,
+  url: string,
+  options: ChaoxingExtractOptions,
+): Promise<PlatformExtractionResult> {
+  const ready = (): boolean => !!doc.querySelector('.bottomList li') || !!doc.querySelector('.null-data');
+  if (!ready()) {
+    // 与任务页同理：XHR 异步渲染，waitFor 是轮询式（就绪即返回），调大只在真慢时多等。
+    await waitFor(ready, options.allowAutoOpen ? 8000 : 6000, 250);
+  }
+  const rowCount = doc.querySelectorAll('.bottomList li').length;
+  const parsed = parseChaoxingExamListDom(doc, url);
+  if (!parsed) {
+    throw new SelectorError(
+      'chaoxing',
+      '.bottomList, .top-back h2',
+      '作业/考试列表未渲染或缺少课程标识',
+    );
+  }
+  // 行在、却一条都认不出来：选择器/文案可能已改版。这里必须硬失败——
+  // 若返回 success + 空列表，后台会把它当成“教师把作业全删了”，
+  // 按课程作用域清空该课所有作业项（真实数据丢失）。
+  if (rowCount > 0 && parsed.items.length === 0) {
+    throw new SelectorError(
+      'chaoxing',
+      '.right-content .overHidden2, .right-content .status',
+      `作业/考试列表有 ${rowCount} 行，但标题或状态文案无法识别（可能已改版）`,
+    );
+  }
+
+  const syncedAt = new Date().toISOString();
+  const assignments = mapChaoxingExamAssignments(parsed.items, {
+    courseId: parsed.courseId,
+    courseName: parsed.courseName,
+    syncedAt,
+    url,
+  });
+
+  if (assignments.length === 0) {
+    // 列表确实为空（.null-data 或 0 行）：这是有效结论，用空数组把该课旧项清掉。
+    return {
+      status: 'success',
+      assignments: [],
+      message: `学习通作业/考试列表「${parsed.courseName}」：无作业或考试。`,
+      courseIds: [parsed.courseId],
+    };
+  }
+
+  // 按状态汇总成一句人话（看板与运行日志同一口径）。
+  const counts = new Map<Assignment['status'], number>();
+  for (const a of assignments) {
+    counts.set(a.status, (counts.get(a.status) ?? 0) + 1);
+  }
+  const parts = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([st, n]) => `${assignmentStatusLabel(st)} ${n}`)
+    .join(' / ');
+  const skipNote = parsed.unparsedRows > 0 ? `，另有 ${parsed.unparsedRows} 行状态未识别已跳过` : '';
+  return {
+    status: 'success',
+    assignments,
+    message: `学习通作业/考试列表「${parsed.courseName}」：${assignments.length} 项（${parts}）${skipNote}。`,
+    courseIds: [parsed.courseId],
   };
 }

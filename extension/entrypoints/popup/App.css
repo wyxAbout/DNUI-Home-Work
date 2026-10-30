@@ -110,6 +110,12 @@ h1 {
   font-size: 11px;
 }
 
+/* 「另有 N 项已完成或已过期」：解释为什么未完成数是 0，必须比普通说明更醒目。 */
+.summary-hidden {
+  color: #b0682a;
+  font-weight: 600;
+}
+
 .filter-row {
   display: flex;
   gap: 8px;
@@ -143,6 +149,57 @@ h1 {
 
 .filter-button.active span {
   color: #518172;
+}
+
+/* 视图切换：作业看板 / 工具（分段控件样式） */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  margin-top: 22px;
+  padding: 4px;
+  border: 1px solid #dfe5e1;
+  border-radius: 10px;
+  background: #eef2ef;
+}
+
+.tab-btn {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 7px;
+  color: #64706f;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.tab-btn:hover {
+  color: #315950;
+}
+
+.tab-btn.active {
+  color: #1f4c40;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(24, 35, 38, 0.12);
+}
+
+.tab-count {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #4f8578;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 /* 显示选项：自动隐藏已过期项（小型开关） */
@@ -275,6 +332,43 @@ h1 {
   white-space: nowrap;
 }
 
+/* 快捷跳转：每个网站一个按钮，无任务时也能直达站点。 */
+.quick-jump {
+  margin-top: 16px;
+}
+
+.quick-jump-head {
+  margin-bottom: 8px;
+  color: #45615a;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.quick-jump-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jump-button {
+  flex: 1 1 auto;
+  padding: 8px 12px;
+  border: 1px solid #dfe5e1;
+  border-radius: 6px;
+  color: #2f6f5e;
+  background: #f3f8f5;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.jump-button:hover {
+  border-color: #88aaa0;
+  background: #e3f0ea;
+}
+
 .assignment-list {
   display: grid;
   gap: 18px;
@@ -345,6 +439,224 @@ h1 {
 .assignment-row.is-expired:hover {
   border-color: #d8b9aa;
   background: #f8efe9;
+}
+
+/* 进行中：醒目橙（与默认未提交一致，强调“现在就要做”）。 */
+.assignment-row.is-in_progress .assignment-mark {
+  background: #c77b5a;
+}
+
+/* 已提交 / 已完成 / 已结束：绿色系，语义上“已办结”（判定表默认隐藏，仅在关闭隐藏时可见）。 */
+.assignment-row.is-submitted,
+.assignment-row.is-completed,
+.assignment-row.is-ended {
+  border-color: #d6e6da;
+  background: #f7fbf8;
+}
+
+.assignment-row.is-submitted .assignment-mark,
+.assignment-row.is-completed .assignment-mark,
+.assignment-row.is-ended .assignment-mark {
+  background: #6f9c7d;
+}
+
+.assignment-row.is-submitted .assignment-content strong,
+.assignment-row.is-completed .assignment-content strong,
+.assignment-row.is-ended .assignment-content strong {
+  color: #6b7a70;
+}
+
+/* 需重交（老师退回）：最高优先级，红系 + 加粗描边，绝不能与“已完成”混淆。 */
+.assignment-row.is-returned {
+  border-color: #e3a9a0;
+  background: #fdf4f2;
+}
+
+.assignment-row.is-returned .assignment-mark {
+  background: #c0503c;
+}
+
+/* 已完成（可重考）：蓝系，区分“办结但可再做一次”。 */
+.assignment-row.is-retake {
+  border-color: #cbdcea;
+  background: #f6fafd;
+}
+
+.assignment-row.is-retake .assignment-mark {
+  background: #4b7fa6;
+}
+
+/* 学习通课程注册表（只读）：展示课程 ID / 教学班 ID，用于核对稳定主键。 */
+.course-registry {
+  margin-top: 12px;
+  border: 1px solid #e2e6e3;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.registry-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #182326;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.registry-caret {
+  color: #8a9a96;
+  font-size: 10px;
+  transition: transform 120ms ease;
+}
+
+.registry-caret.open {
+  transform: rotate(180deg);
+}
+
+.registry-title {
+  flex: 1;
+  font-weight: 700;
+}
+
+.registry-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef3f0;
+  color: #5d7a72;
+  font-size: 11px;
+}
+
+/* 阶段 B 逐课同步：注册表下方的操作行（按 courseId/clazzId 逐门取任务列表） */
+.registry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 10px;
+}
+
+.crawl-button {
+  padding: 6px 12px;
+  border: 1px solid #cfe0d9;
+  border-radius: 999px;
+  background: #f2f8f5;
+  color: #1f6f5c;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.crawl-button:hover:not(:disabled) {
+  border-color: #a9cfc0;
+  background: #e6f2ec;
+}
+
+.crawl-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.crawl-hint {
+  flex: 1 1 100%;
+  color: #5d7a72;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 逐课同步的逐页明细：只在「作业页有没有抓到」这类问题上才看得出来，故默认折叠。 */
+.crawl-detail {
+  flex: 1 1 100%;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #4a5d58;
+}
+
+.crawl-detail summary {
+  cursor: pointer;
+  color: #2f6f63;
+  font-weight: 600;
+}
+
+.crawl-detail ul {
+  margin: 6px 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.crawl-detail li {
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.crawl-detail-course {
+  font-weight: 600;
+  color: #24352f;
+}
+
+.crawl-detail .crawl-page-kind {
+  display: inline-block;
+  min-width: 62px;
+  color: #6b7c77;
+}
+
+.crawl-page-ok {
+  color: #2f6f63;
+}
+
+/* 失败原因要能一眼看到，故用与「未完成」同源的红，但压暗避免喧宾夺主。 */
+.crawl-page-fail {
+  color: #b0323f;
+}
+
+.registry-list {
+  display: grid;
+  margin: 0;
+  padding: 0 12px 12px;
+  gap: 8px;
+  list-style: none;
+}
+
+.registry-item {
+  display: grid;
+  padding: 8px 10px;
+  gap: 3px;
+  border: 1px solid #edf0ee;
+  border-radius: 10px;
+  background: #fbfcfa;
+}
+
+.registry-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-alias,
+.registry-teacher,
+.registry-ids,
+.registry-progress {
+  color: #798483;
+  font-size: 11px;
+}
+
+.registry-ids {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0.3px;
+}
+
+.registry-progress {
+  color: #5d7a72;
 }
 
 .assignment-mark {
@@ -483,6 +795,13 @@ h1 {
   }
 
   .summary-meta {
+    /* 窄屏下列次要说明，但「另有 N 项已完成或已过期」必须留着——
+       它是解释「为什么未完成是 0」的唯一线索，隐藏了就等于让用户以为同步失败。 */
+    display: flex;
+    font-size: 10px;
+  }
+
+  .summary-meta > span:not(.summary-hidden) {
     display: none;
   }
 
@@ -847,4 +1166,92 @@ h1 {
 
 .log-error {
   background: #fbf0ef;
+}
+
+/* 诊断面板：已取证的内容页切换（任务列表 / 作业列表 / 考试列表 各一份 JSON） */
+.probe-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 4px;
+}
+
+.probe-tab {
+  max-width: 200px;
+  padding: 4px 10px;
+  border: 1px solid #dfe6e2;
+  border-radius: 999px;
+  background: #fff;
+  color: #3f5a53;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.probe-tab.active {
+  border-color: #1f6f5c;
+  background: #eef7f3;
+  color: #14503f;
+  font-weight: 600;
+}
+
+/* 候选内容页取证结论：一眼看出“作业/考试”是没拼对地址、被重定向，还是根本是空壳 */
+.probe-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: baseline;
+}
+
+.probe-flag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.probe-ok .probe-flag {
+  background: #e6f2ec;
+  color: #1f6f5c;
+}
+
+.probe-fail .probe-flag {
+  background: #fdf0e6;
+  color: #9a3412;
+}
+
+.probe-target {
+  font-size: 11px;
+  font-weight: 600;
+  color: #182326;
+}
+
+.probe-url {
+  font-size: 10px;
+  color: #6b7f7a;
+  overflow-wrap: anywhere;
+}
+
+.probe-meta,
+.probe-reason {
+  font-size: 10px;
+  color: #6b7f7a;
+}
+
+.probe-reason {
+  color: #9a3412;
+}
+
+.probe-sample {
+  flex: 1 1 100%;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #f7faf8;
+  color: #7d918b;
+  font-size: 10px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }

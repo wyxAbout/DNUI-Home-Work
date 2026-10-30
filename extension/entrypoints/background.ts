@@ -1,14 +1,45 @@
 import {
   getAllAssignments,
-  isAssignmentExpired,
+  isAssignmentVisible,
   mergeAssignmentsByCourse,
   PLATFORM_HOSTS,
   PLATFORM_LABELS,
+  type ChaoxingCourse,
   type HomeworkStore,
   type PlatformId,
   type PlatformSnapshot,
 } from '@/src/models';
-import { loadHideExpired, loadHomeworkStore, loadStartupNotifyEnabled, updatePlatformSnapshot } from '@/src/storage';
+import {
+  loadChaoxingCourses,
+  loadHideExpired,
+  loadHomeworkStore,
+  loadStartupNotifyEnabled,
+  loadChaoxingTaskUrls,
+  saveChaoxingCourses,
+  saveChaoxingCrawlState,
+  saveChaoxingTaskUrls,
+  updatePlatformSnapshot,
+} from '@/src/storage';
+import {
+  chaoxingCrawlPageKindOf,
+  chaoxingCrawlPageLabel,
+  crawlCourseKeysOfReport,
+  crawlUrlMemoryKey,
+  createFinishedCrawlState,
+  createRunningCrawlState,
+  orderCrawlCandidateUrls,
+  planChaoxingCrawl,
+  rememberCourseTaskUrl,
+  summarizeChaoxingCrawl,
+  withChaoxingPageAdvice,
+  CHAOXING_CRAWL_TIMEOUT_MS,
+  type ChaoxingCrawlOutcome,
+  type ChaoxingCrawlPage,
+  type ChaoxingCrawlPageKind,
+  type ChaoxingCrawlPageResult,
+  type ChaoxingCrawlReport,
+  type ChaoxingCrawlTarget,
+} from '@/src/chaoxing-crawl';
 import { appendLog } from '@/src/log';
 
 interface PlatformPageReadyMessage {
@@ -21,6 +52,8 @@ interface PlatformPageReadyMessage {
   courseName?: string;
   courseIds?: string[];
   replaceAll?: boolean;
+  // 课程注册表（目前仅学习通「我的课程」页产出，阶段 A）。
+  courses?: ChaoxingCourse[];
   message: string;
   // 发送方 content script 的构建标识（用于排查“旧脚本仍在应答”类问题）。
   buildId?: string;
@@ -120,7 +153,8 @@ async function resyncOpenPlatformTabs(): Promise<void> {
 
 // 与看板「未完成 N 项」完全同口径的计数：
 // 1) 只统计缓存中的未提交作业（getAllAssignments）；
-// 2) 若用户开启了「自动隐藏已过期项」，剔除 dueAt 已过期的条目（与弹窗 visibleCount 一致）。
+// 2) 用 isAssignmentVisible 过滤：排除默认隐藏的 completed/ended，并（开启开关时）排除已过期条目
+//    —— dueAt 已过 或 平台已明确标记 status='expired' 的都算已过期（与弹窗 visibleCount 一致）。
 // 返回可见数与被隐藏数，供通知文案区分「真没有」和「被隐藏了」。
 async function summarizeVisibleAssignments(): Promise<{
   visible: number;
@@ -135,9 +169,7 @@ async function summarizeVisibleAssignments(): Promise<{
   }
 
   const hideExpired = await loadHideExpired();
-  const visible = hideExpired
-    ? assignments.filter((a) => !isAssignmentExpired(a.dueAt)).length
-    : assignments.length;
+  const visible = assignments.filter((a) => isAssignmentVisible(a, { hideExpired })).length;
 
   return { visible, hidden: assignments.length - visible, hasData: true };
 }
@@ -238,8 +270,9 @@ async function refreshSummaryNotification(force = false): Promise<void> {
 
   // 与看板一致：隐藏项不计入主数字，但明确提示「还有 N 项被隐藏」，
   // 避免用户以为全部完成，实际是过期项被开关隐藏了。
+  // 隐藏项可能是“已完成/已结束”（默认隐藏）或“已过期”（开关隐藏），故用中性措辞。
   const hiddenNote =
-    summary.hidden > 0 ? `另有 ${summary.hidden} 项已过截止时间被自动隐藏。` : '';
+    summary.hidden > 0 ? `另有 ${summary.hidden} 项已完成或已过期。` : '';
 
   try {
     // 统一先清掉固定通知（平时原地更新 / 重开清残留），避免两条 ID 的通知同时存在于通知中心。
@@ -407,10 +440,12 @@ export default defineBackground(() => {
     void appendLog('info', 'sync', `汇总通知已关闭（${byUser ? '用户手动关闭' : '系统自动收起'}）`);
   });
 
-  browser.runtime.onMessage.addListener(async (message: PlatformPageReadyMessage) => {
-    if (message?.type !== 'PLATFORM_PAGE_READY') {
-      return;
-    }
+  // 页面上报的处理主体（由下面的同步分发器调用）。
+  // 历史坑：这里原本直接写成 `onMessage.addListener(async (message) => {…})`。
+  // 在 Chrome 里，async 监听器返回的 Promise 会被当成“本条消息的应答”（值为 undefined），
+  // 且一条消息只能有一个应答者 —— 于是同一扩展里的逐课同步请求永远拿不到响应通道，
+  // 弹窗只能显示“逐课同步未返回结果”。现在改成：单条同步分发器 + 只有该处理的类型才处理。
+  async function handlePlatformPageReady(message: PlatformPageReadyMessage): Promise<void> {
 
     // 计算本次更新：成功同步按课程合并缓存，支持同一平台下多门课程作业汇总（而非整平台覆盖）。
     let update: Partial<PlatformSnapshot>;
@@ -426,9 +461,18 @@ export default defineBackground(() => {
             ? [message.courseId]
             : [];
       // replaceAll：本次结果对该平台整体有效（如首页空态），整组替换；否则按课程合并。
+      // 学习通一门课分两页上报（任务列表 / 作业·考试列表），两者课程作用域相同、
+      // 覆盖的条目不同。必须把页面种类传进合并逻辑，否则先到的任务页会把
+      // 后到的作业页刚写入的条目整批清掉（表现为“同步成功但没有作业”）。
+      const pageKind = message.platformId === 'chaoxing' ? chaoxingCrawlPageKindOf(message.url) : null;
       const merged = message.replaceAll
         ? (message.assignments ?? [])
-        : mergeAssignmentsByCourse(existing, message.assignments ?? [], scope);
+        : mergeAssignmentsByCourse(
+            existing,
+            message.assignments ?? [],
+            scope,
+            pageKind ? { kind: pageKind } : undefined,
+          );
       update = {
         status: message.status,
         lastVisitedUrl: message.url,
@@ -465,10 +509,444 @@ export default defineBackground(() => {
       void appendLog('error', 'sync', `${label} 同步失败：${message.message ?? '未知错误'}`);
     }
 
+    // 课程注册表（阶段 A）：整体覆盖写入，与作业缓存解耦——注册表页不产出作业，
+    // 作业列表仍按课程页逐课同步；注册表用于回答“一共有几门课 / 哪些课还没同步过”。
+    if (message.courses && message.courses.length > 0) {
+      await saveChaoxingCourses(message.courses);
+      void appendLog(
+        'info',
+        'sync',
+        `${PLATFORM_LABELS[message.platformId]} 课程注册表已更新：${message.courses.length} 门课`,
+      );
+    }
+
     void updatePlatformSnapshot(message.platformId, update);
+
+    // 记住这门课「真的成功解析出列表」的那个地址（来自页面自身的 location.href，
+    // 因此含 stuenc/enc/t 等会话参数）。下次逐课抓取优先用它，成功率比自拼地址高。
+    // 键必须是「页面种类 + 课程」：任务页与作业/考试页是两套会话参数，
+    // 共用一个键会互相覆盖，导致每次总有一页退回自拼地址。
+    if (
+      message.status === 'success' &&
+      message.platformId === 'chaoxing' &&
+      message.courseIds?.length === 1
+    ) {
+      const kind = chaoxingCrawlPageKindOf(message.url);
+      if (kind) {
+        const courseKey = message.courseIds[0]!;
+        try {
+          const memory = await loadChaoxingTaskUrls();
+          await saveChaoxingTaskUrls(
+            rememberCourseTaskUrl(memory, crawlUrlMemoryKey(kind, courseKey), message.url),
+          );
+        } catch {
+          /* 记忆地址失败不影响同步本身 */
+        }
+      }
+    }
+
+    // 逐课抓取（阶段 B）在等这门课的上报：落库后唤醒等待者，
+    // 抓取流程据此关闭临时后台标签、继续下一门课。
+    settleCrawlWaiter(message);
 
     // 同步落库后让右下角通知与工具栏角标跟随看板数量刷新（数量没变则内部不会重复弹）。
     void refreshSummaryNotification();
     void refreshActionBadge();
+  }
+
+  // 统一分发器（必须是同步函数，且对“不归它管”的消息返回 undefined）：
+  // 返回 Promise 就等于抢答，会把其它类型的消息应答通道占掉。
+  browser.runtime.onMessage.addListener((message: { type?: string } | undefined) => {
+    if (message?.type === 'CRAWL_CHAOXING_COURSES') {
+      // 逐课同步整批要跑几十秒：结果写进 storage 状态存档，弹窗读存档展示，
+      // 不依赖消息应答（弹窗中途关掉也不会丢结果）。
+      void crawlChaoxingCourses();
+      return undefined;
+    }
+    if (message?.type === 'CHAOXING_URL_HINT') {
+      // 页面把「带会话参数的列表页真实地址」送过来，只记不用应答。
+      const urls = (message as { urls?: unknown }).urls;
+      if (Array.isArray(urls)) {
+        void rememberChaoxingUrlHints(urls.filter((u): u is string => typeof u === 'string'));
+      }
+      return undefined;
+    }
+    if (message?.type !== 'PLATFORM_PAGE_READY') {
+      return undefined;
+    }
+    void handlePlatformPageReady(message as PlatformPageReadyMessage);
+    return undefined;
   });
+
+  // ==================== 阶段 B：基于课程注册表逐课抓取 ====================
+  // 为什么由后台做：抓取要连开若干临时标签、跨几十秒，弹窗一关就会中断，
+  // 而后台 service worker 不随弹窗关闭而结束（并有下面 keepAlive 兜住回收）。
+  // 为什么不 fetch HTML：任务列表是 SPA，原始 HTML 只有骨架；
+  // 必须让页面自己渲染，再由该标签里的 content script 上报——这与诊断工具走的是同一条
+  // 确定性路径（2026-10-25 已验证可行）。
+
+  // 等待表：key = `页面种类:课程键`（如 `exam:259363438-139380153`）→ 该页的兑现回调。
+  // 为什么要带种类：一门课现在要抓两页（任务页 + 作业/考试页），两页上报的
+  // courseIds 完全相同（都是 `courseid-clazzid`）。若只按课程键索引，
+  // 任务页的上报会把作业页的等待提前兑现 —— 表现为“作业页永远超时/串结果”。
+  const crawlWaiters = new Map<
+    string,
+    (outcome: { ok: boolean; message: string; count?: number }) => void
+  >();
+
+  // content script 上报到达后兑现对应页。同一页可能有多条上报（顶层 + iframe），
+  // 取第一条即可：后续上报照常合并进缓存。
+  function settleCrawlWaiter(message: PlatformPageReadyMessage): void {
+    const kind = chaoxingCrawlPageKindOf(message.url);
+    // 课程键从 message 与 url 双路取：解析失败的上报只有 url（见 crawlCourseKeysOfReport 注释）。
+    const courseKeys = crawlCourseKeysOfReport({
+      url: message.url,
+      courseId: message.courseId,
+      courseIds: message.courseIds,
+    });
+    const waitKeys = new Set<string>();
+    for (const key of courseKeys) {
+      if (kind) {
+        waitKeys.add(crawlUrlMemoryKey(kind, key));
+      }
+      // 兼容不带种类的裸键（暂无写入方，留作兜底，避免以后新增入口时莫名超时）。
+      waitKeys.add(key);
+    }
+    for (const key of waitKeys) {
+      const settle = crawlWaiters.get(key);
+      if (!settle) {
+        continue;
+      }
+      crawlWaiters.delete(key);
+      settle({
+        ok: message.status === 'success',
+        message: message.message,
+        count: (message.assignments ?? []).length,
+      });
+    }
+  }
+
+  // 记住页面上采集到的学习通列表**真实地址**（含服务端下发的 enc/cpi 等会话参数）。
+  // 为什么必须这么做：作业/考试列表用自拼的 `courseid + clazzid` 打开时，多数登录态下
+  // 只会得到一张「提示」弹窗页（正文 0 字、没有列表 DOM），逐课同步的作业页因此永远失败。
+  // enc 由服务端下发、前端无法生成，唯一可靠来源就是页面上真实存在的链接
+  // —— 用户只要打开过一次该课程的「作业」页，我们就能记住并复用。
+  async function rememberChaoxingUrlHints(urls: string[]): Promise<void> {
+    const usable: { key: string; url: string }[] = [];
+    for (const raw of urls) {
+      if (typeof raw !== 'string' || !raw) {
+        continue;
+      }
+      const kind = chaoxingCrawlPageKindOf(raw);
+      if (!kind) {
+        continue;
+      }
+      let courseKey = '';
+      try {
+        const params = new URL(raw).searchParams;
+        const cid = (params.get('courseid') || params.get('courseId') || '').trim();
+        const lid = (params.get('clazzid') || params.get('classId') || '').trim();
+        if (cid && lid) {
+          courseKey = `${cid}-${lid}`;
+        }
+      } catch {
+        continue;
+      }
+      if (!courseKey) {
+        continue;
+      }
+      usable.push({ key: crawlUrlMemoryKey(kind, courseKey), url: raw });
+    }
+    if (usable.length === 0) {
+      return;
+    }
+    try {
+      let memory = await loadChaoxingTaskUrls();
+      let changed = false;
+      for (const { key, url } of usable) {
+        if (memory[key] === url) {
+          continue;
+        }
+        memory = rememberCourseTaskUrl(memory, key, url);
+        changed = true;
+      }
+      if (changed) {
+        await saveChaoxingTaskUrls(memory);
+        void appendLog(
+          'info',
+          'sync',
+          `学习通：已记住 ${usable.length} 个列表页真实地址（含会话参数），下次逐课同步优先使用`,
+        );
+      }
+    } catch {
+      /* 记地址失败不影响同步本身 */
+    }
+  }
+
+  // 超时后回读一次临时标签：把「这个标签到底打开了什么」写进失败原因。
+  // 没有这一步，所有失败都长成同一句话（“超时，可能未登录”）：
+  // 用户既不知道该去登录、该重试，还是该手动点一次作业页让扩展记住 enc。
+  async function probeCrawlTab(tabId: number): Promise<string> {
+    try {
+      const [res] = await browser.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+          return {
+            title: document.title || '',
+            readyState: document.readyState || '',
+            hasList: !!document.querySelector('.bottomList'),
+            textLength: text.length,
+            sample: text.slice(0, 80),
+          };
+        },
+      });
+      const info = res?.result as
+        | {
+            title: string;
+            readyState: string;
+            hasList: boolean;
+            textLength: number;
+            sample: string;
+          }
+        | undefined;
+      if (!info) {
+        return '';
+      }
+      if (info.hasList) {
+        return `页面已渲染出列表但未上报（标题「${info.title}」）`;
+      }
+      if (info.textLength === 0 && info.readyState !== 'complete') {
+        return `页面仍在加载（${info.readyState}）`;
+      }
+      if (info.textLength === 0) {
+        return `标签页正文为空（标题「${info.title}」），大概率是缺少 enc 的弹窗壳页`;
+      }
+      return `标签页未渲染出列表（标题「${info.title}」，正文 ${info.textLength} 字：${info.sample}）`;
+    } catch {
+      // 不可注入（跨域/已跳转/已关闭）：不追加噪音，保留原来的超时说明。
+      return '';
+    }
+  }
+
+  // 抓一门课的**一页**：开后台标签 → 等该页上报（或超时）→ 关标签。
+  // 成功与否都要关：临时标签绝不能残留在用户标签栏里。
+  async function crawlSinglePage(
+    target: ChaoxingCrawlTarget,
+    page: ChaoxingCrawlPage,
+    url = page.url,
+  ): Promise<ChaoxingCrawlPageResult> {
+    const waitKey = crawlUrlMemoryKey(page.kind, target.courseKey);
+    const tag = `学习通逐课同步「${target.name}」${chaoxingCrawlPageLabel(page.kind)}`;
+    let tabId: number | undefined;
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const settled = new Promise<{ ok: boolean; message: string; count?: number }>((resolve) => {
+      crawlWaiters.set(waitKey, resolve);
+    });
+    const TIMEOUT = Symbol('crawl-timeout');
+    // 单页结果只描述这一页的成败；课程级汇总（含 pages 明细）在 runChaoxingCrawl 里组装。
+    const done = (ok: boolean, message: string, count?: number): ChaoxingCrawlPageResult => ({
+      kind: page.kind,
+      ok,
+      message,
+      count,
+    });
+    try {
+      const tab = await browser.tabs.create({ url, active: false });
+      tabId = tab.id;
+      const outcome = await Promise.race([
+        settled,
+        new Promise<typeof TIMEOUT>((resolve) => {
+          timeoutTimer = setTimeout(() => resolve(TIMEOUT), CHAOXING_CRAWL_TIMEOUT_MS);
+        }),
+      ]);
+      if (outcome === TIMEOUT) {
+        const probe = typeof tabId === 'number' ? await probeCrawlTab(tabId) : '';
+        const seconds = Math.round(CHAOXING_CRAWL_TIMEOUT_MS / 1000);
+        const message = probe
+          ? `等待页面上报超时（${seconds}s）：${probe}`
+          : `等待页面上报超时（${seconds}s，可能未登录或页面加载过慢）`;
+        void appendLog('warn', 'sync', `${tag}：${message}`);
+        return done(false, message);
+      }
+      void appendLog(outcome.ok ? 'info' : 'warn', 'sync', `${tag}：${outcome.message}`);
+      // count 只在成功时有意义：失败上报的 assignments 一定是空的，带上会让明细显示“失败 · 0 项”。
+      return done(outcome.ok, outcome.message, outcome.ok ? outcome.count : undefined);
+    } catch (err) {
+      const message = `打开标签页失败：${err instanceof Error ? err.message : String(err)}`;
+      void appendLog('error', 'sync', `${tag}：${message}`);
+      return done(false, message);
+    } finally {
+      // 上报先到时超时定时器还在跑：及时清掉，避免它多挂 25s。
+      if (typeof timeoutTimer !== 'undefined') {
+        clearTimeout(timeoutTimer);
+      }
+      crawlWaiters.delete(waitKey);
+      if (typeof tabId === 'number') {
+        await browser.tabs.remove(tabId).catch(() => undefined);
+      }
+    }
+  }
+
+  // 并发保护：两个弹窗/连点会同时开两批标签，且等待表按课程键覆盖，结果会互相串。
+  // 直接拒绝后来者，比让它把前一整批的等待表踩乱安全。
+  let crawlInFlight = false;
+
+  // 对外入口：只负责“运行态存档”的开销与收尾，具体抓取在 runChaoxingCrawl 里。
+  // 结果写进 storage（chaoxing-crawl-state），弹窗读存档展示——不依赖 sendMessage 应答。
+  async function crawlChaoxingCourses(): Promise<void> {
+    if (crawlInFlight) {
+      void appendLog('warn', 'sync', '逐课同步已在进行中，本次请求已忽略');
+      return;
+    }
+    crawlInFlight = true;
+    const startedAt = new Date().toISOString();
+    await saveChaoxingCrawlState(createRunningCrawlState(startedAt));
+    try {
+      const report = await runChaoxingCrawl((done, total, succeeded) => {
+        // 进度也写进存档：弹窗关掉再打开能看到“3/6 门已完成”，而不是一片空白。
+        void saveChaoxingCrawlState({
+          ...createRunningCrawlState(startedAt),
+          total,
+          succeeded,
+          failed: done - succeeded,
+        });
+      });
+      await saveChaoxingCrawlState(
+        createFinishedCrawlState(report, startedAt, new Date().toISOString()),
+      );
+    } catch (err) {
+      const message = `逐课同步异常：${err instanceof Error ? err.message : String(err)}`;
+      void appendLog('error', 'sync', message);
+      await saveChaoxingCrawlState({
+        running: false,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        total: 0,
+        succeeded: 0,
+        failed: 0,
+        message,
+        items: [],
+      });
+    } finally {
+      crawlInFlight = false;
+    }
+  }
+
+  async function runChaoxingCrawl(
+    onProgress?: (done: number, total: number, succeeded: number) => void,
+  ): Promise<ChaoxingCrawlReport> {
+    let plan: ChaoxingCrawlTarget[];
+    try {
+      plan = planChaoxingCrawl(await loadChaoxingCourses());
+    } catch (err) {
+      const message = `读取课程注册表失败：${err instanceof Error ? err.message : String(err)}`;
+      void appendLog('error', 'sync', message);
+      return { ok: false, total: 0, succeeded: 0, failed: 0, items: [], message };
+    }
+
+    if (plan.length === 0) {
+      const message =
+        '课程注册表为空：请先打开「我的课程」页停留几秒，让扩展记录每门课的 courseId / clazzId';
+      void appendLog('warn', 'sync', `学习通逐课同步跳过：${message}`);
+      return { ok: false, total: 0, succeeded: 0, failed: 0, items: [], message };
+    }
+
+    void appendLog(
+      'info',
+      'sync',
+      `学习通逐课同步开始：${plan.length} 门课，每门开临时标签读取「任务列表 + 作业/考试列表」`,
+    );
+
+    // MV3 后台闲置约 30s 会被回收，而逐课抓取可能持续数分钟：
+    // 定时调一次轻量 API 重置闲置计时，避免中途被回收导致后面的课整批漏抓。
+    const keepAlive = setInterval(() => {
+      void browser.runtime.getPlatformInfo().catch(() => undefined);
+    }, 15_000);
+
+    // 每门课优先用「上次真的成功过」的地址（含会话参数），自拼地址作后备。
+    const urlMemory = await loadChaoxingTaskUrls().catch(() => ({}) as Record<string, string>);
+
+    const items: ChaoxingCrawlOutcome[] = [];
+    try {
+      for (const target of plan) {
+        // 一门课要抓两页：任务/活动列表 + 作业/考试列表。
+        // 只抓任务页是历史缺陷 —— 作业、测验、课堂活动全在 exam-list 里，
+        // 少了它看板永远看不到作业（2026-10-29 由诊断取证发现）。
+        const pageResults: ChaoxingCrawlPageResult[] = [];
+        for (const page of target.pages) {
+          const remembered = urlMemory[crawlUrlMemoryKey(page.kind, target.courseKey)];
+          const candidates = orderCrawlCandidateUrls(page.url, remembered);
+          let ok = false;
+          let message = '';
+          let count: number | undefined;
+          for (let i = 0; i < candidates.length; i += 1) {
+            const res = await crawlSinglePage(target, page, candidates[i]);
+            ok = res.ok;
+            message = res.message;
+            count = res.count;
+            if (ok) {
+              break;
+            }
+            // 只在“页面开了但没渲染出列表”时换下一个地址：
+            // 超时/未登录说明不是地址的问题，再开标签只是白等。
+            if (!message.includes('未渲染')) {
+              break;
+            }
+            if (i + 1 < candidates.length) {
+              void appendLog(
+                'info',
+                'sync',
+                `学习通逐课同步「${target.name}」${chaoxingCrawlPageLabel(
+                  page.kind,
+                )}：当前地址未渲染出列表，换下一个地址重试`,
+              );
+            }
+          }
+          pageResults.push({
+            kind: page.kind,
+            ok,
+            message: withChaoxingPageAdvice(page.kind, ok, message),
+            count,
+          });
+        }
+
+        // 课程成功口径：**至少一页成功**即算成功。
+        // 作业页失败不应连带否定任务页已入库的真实数据（反之亦然）；
+        // 具体哪一页失败由 message 与运行日志说清楚，不在这里夸大失败。
+        const okPages = pageResults.filter((p) => p.ok);
+        const detail = pageResults
+          .map((p) => `${chaoxingCrawlPageLabel(p.kind)}${p.ok ? '成功' : '失败'}`)
+          .join('，');
+        items.push({
+          courseKey: target.courseKey,
+          name: target.name,
+          ok: okPages.length > 0,
+          // 两页只成功一页时标 partial：不允许被汇总成“全部成功”而掩盖某页没抓到。
+          partial: okPages.length > 0 && okPages.length < pageResults.length,
+          // 逐页明细进存档：弹窗要能回答「作业页成没成、失败原因是什么」。
+          pages: pageResults,
+          message: `共 ${pageResults.length} 页：${detail}`,
+        });
+        onProgress?.(items.length, plan.length, items.filter((it) => it.ok).length);
+      }
+    } finally {
+      clearInterval(keepAlive);
+      crawlWaiters.clear();
+    }
+
+    const succeeded = items.filter((it) => it.ok).length;
+    const message = summarizeChaoxingCrawl(items);
+    void appendLog(succeeded === items.length ? 'info' : 'warn', 'sync', message);
+    // 抓取过程中每次上报都会刷新角标，这里再收一次尾，确保数字与最终缓存一致。
+    void refreshActionBadge();
+    return {
+      ok: succeeded === items.length,
+      total: items.length,
+      succeeded,
+      failed: items.length - succeeded,
+      items,
+      message,
+    };
+  }
 });
