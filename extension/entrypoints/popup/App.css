@@ -287,20 +287,49 @@ h1 {
 
 .platform-status {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  /* 四个平台状态项排成一行；间距收窄，让一行更紧凑。 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
   margin-top: 16px;
 }
 
 .platform-status-item {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 6px;
+  row-gap: 2px;
   align-items: center;
   min-width: 0;
-  gap: 7px;
-  padding: 9px 10px;
-  border-bottom: 1px solid #e1e6e3;
+  padding: 8px 9px;
+  border: 1px solid #e1e6e3;
+  border-radius: 8px;
   color: #5e696a;
   font-size: 11px;
+  background: #ffffff;
+}
+
+/* 状态圆点占左侧、竖向居中并贯穿两行（名字在上、状态在下） */
+.platform-status-item > span:nth-child(1) {
+  grid-row: 1 / span 2;
+  grid-column: 1;
+  align-self: center;
+}
+
+.platform-status-item > span:nth-child(2) {
+  grid-column: 2;
+  overflow: hidden;
+  color: #3f4a4b;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 名字与状态左对齐成列，不再被 margin-left:auto 推到最右 */
+.platform-status-item .status-label {
+  grid-column: 2;
+  margin-left: 0;
+  color: #9aa3a1;
+  font-size: 10.5px;
 }
 
 .status-dot {
@@ -1254,4 +1283,992 @@ h1 {
   font-size: 10px;
   line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+/* ==========================================================================
+   v2 · 设计稿 04 视觉改版（2026-10-30）
+   浅色低压力 · 按平台分组 · 截止时间分级
+   以下规则位于旧样式之后，用于覆盖原有视觉；旧规则保留以免误伤诊断/日志细节。
+   ========================================================================== */
+
+.app-shell {
+  width: 100%;
+  min-height: 560px;
+  padding: 14px 16px 8px;
+  color: #17251f;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.loading-state {
+  display: grid;
+  place-items: center;
+  color: #7e8c85;
+}
+
+/* 390×600 是扩展弹窗的实际上限：看板固定高度，列表内部滚动，
+   保证「头部 / 汇总 / 筛选 / 底部状态」始终可见（对齐设计稿 04）。 */
+.app-shell.is-dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 600px;
+  min-height: 600px;
+  overflow: hidden;
+}
+
+.app-shell.is-dashboard .assignment-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 2px 12px 0;
+  /* 隐藏滑轨但保留滚动：滚轮/触控板/键盘仍然可用 */
+  scrollbar-width: none;
+}
+
+.app-shell.is-dashboard .assignment-list::-webkit-scrollbar {
+  display: none;
+}
+
+.app-shell.is-dashboard .footer {
+  margin-top: 10px;
+}
+
+/* ---------- 头部 ---------- */
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.topbar-main {
+  min-width: 0;
+}
+
+.topbar h1 {
+  margin: 0;
+  color: #17251f;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  line-height: 1.25;
+}
+
+.subtitle {
+  margin-top: 4px;
+  color: #85938b;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+  line-height: 1.4;
+}
+
+.topbar-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+  padding-top: 2px;
+}
+
+.icon-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #e3eae4;
+  border-radius: 9px;
+  color: #4b5a52;
+  background: #fcfdfb;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.icon-button:hover {
+  border-color: #c4d6c9;
+  background: #f3f8f4;
+}
+
+.icon-button svg {
+  display: block;
+}
+
+.spinning svg {
+  animation: hw-spin 0.9s linear infinite;
+}
+
+@keyframes hw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ---------- 汇总卡 ---------- */
+.summary-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 13px 14px;
+  border: 1px solid #d8e8dd;
+  border-radius: 14px;
+  background: linear-gradient(140deg, #e9f3ec 0%, #f8fcf8 62%, #f2f8f2 100%);
+}
+
+.summary-main {
+  min-width: 0;
+}
+
+.summary-cap {
+  color: #6e8a7c;
+  font-size: 10px;
+  letter-spacing: 1px;
+}
+
+.summary-num {
+  margin-top: 3px;
+  color: #2f6b5d;
+  font-family: "Bahnschrift", "Segoe UI", sans-serif;
+  font-size: 36px;
+  font-weight: 300;
+  letter-spacing: 0.5px;
+  line-height: 1;
+}
+
+.summary-num span {
+  margin-left: 4px;
+  color: #7e8c85;
+  font-family: "Microsoft YaHei UI", sans-serif;
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.5px;
+}
+
+.summary-sub {
+  margin-top: 7px;
+  color: #83978b;
+  font-size: 9.5px;
+  letter-spacing: 0.1px;
+  line-height: 1.5;
+}
+
+.summary-hidden {
+  display: block;
+  margin-top: 6px;
+  color: #b0682a;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.summary-platforms {
+  display: grid;
+  flex: none;
+  gap: 4px;
+  align-content: center;
+}
+
+.summary-platform {
+  display: grid;
+  grid-template-columns: 6px 1fr 12px;
+  align-items: center;
+  gap: 6px;
+  color: #6e7c74;
+  font-size: 9.5px;
+  letter-spacing: 0.1px;
+}
+
+.summary-platform span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-platform b {
+  color: #43524b;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: right;
+}
+
+/* 平台色只做小圆点，不铺大色块 */
+.plat-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.plat-dot.plat-neusoft {
+  background: #2f6b5d;
+}
+
+.plat-dot.plat-pigai {
+  background: #dfa23f;
+}
+
+.plat-dot.plat-itest {
+  background: #6e93a8;
+}
+
+.plat-dot.plat-chaoxing {
+  background: #7c6bb0;
+}
+
+/* ---------- 平台筛选 ---------- */
+.filter-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 12px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.filter-row::-webkit-scrollbar {
+  display: none;
+}
+
+.filter-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 10px;
+  border: 1px solid #e5ece6;
+  border-radius: 8px;
+  color: #65736b;
+  background: #fcfdfb;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+}
+
+.filter-button span {
+  color: #9aa79f;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 9.5px;
+}
+
+.filter-button:hover {
+  border-color: #c9d9cd;
+  background: #f3f8f4;
+}
+
+.filter-button.active {
+  border-color: #17251f;
+  color: #f1f6f2;
+  background: #17251f;
+}
+
+.filter-button.active span {
+  color: #b9cdbf;
+}
+
+/* ---------- 作业分组 / 卡片 ---------- */
+.assignment-list {
+  display: block;
+  margin-top: 14px;
+}
+
+.assignment-group {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.assignment-group:last-child {
+  margin-bottom: 0;
+}
+
+.assignment-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 6px;
+  border-bottom: 0;
+}
+
+.group-head-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.group-label {
+  overflow: hidden;
+  color: #3e4c45;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-count {
+  flex: none;
+  color: #94a29a;
+  font-size: 9.5px;
+}
+
+.group-meta {
+  flex: none;
+  color: #aebbb2;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.2px;
+}
+
+.task-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 6px;
+  padding: 10px 11px;
+  border: 1px solid #edf1ed;
+  border-radius: 11px;
+  background: #fcfdfb;
+  box-shadow: 0 6px 12px -10px rgba(23, 37, 31, 0.35);
+  color: inherit;
+  text-decoration: none;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.task-card:last-child {
+  margin-bottom: 0;
+}
+
+.task-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: #7e8c85;
+}
+
+.task-card.plat-neusoft::before {
+  background: #2f6b5d;
+}
+
+.task-card.plat-pigai::before {
+  background: #dfa23f;
+}
+
+.task-card.plat-itest::before {
+  background: #6e93a8;
+}
+
+.task-card.plat-chaoxing::before {
+  background: #7c6bb0;
+}
+
+.task-card:hover {
+  border-color: #c9d9cd;
+  background: #ffffff;
+  transform: translateY(-1px);
+}
+
+.task-ic {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  border-radius: 8px;
+  background: #eef4ef;
+  color: #5c6b63;
+}
+
+.task-card.plat-neusoft .task-ic {
+  background: #e7f2eb;
+  color: #2f6b5d;
+}
+
+.task-card.plat-pigai .task-ic {
+  background: #fbf2e2;
+  color: #c08a2e;
+}
+
+.task-card.plat-itest .task-ic {
+  background: #eaf1f4;
+  color: #5b8499;
+}
+
+.task-card.plat-chaoxing .task-ic {
+  background: #efecf7;
+  color: #7c6bb0;
+}
+
+.task-body {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+}
+
+.task-body strong {
+  overflow: hidden;
+  color: #27352e;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-body span {
+  overflow: hidden;
+  color: #93a198;
+  font-size: 9.5px;
+  letter-spacing: 0.1px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.due-badge {
+  flex: none;
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+}
+
+.due-today {
+  color: #b4472f;
+  background: #fbeae5;
+}
+
+.due-soon {
+  color: #9a6a1e;
+  background: #fbf2e2;
+}
+
+.due-later {
+  color: #6b7a72;
+  background: #eff3ef;
+}
+
+.due-overdue {
+  color: #c0503c;
+  background: #fdf0ee;
+}
+
+.due-none {
+  color: #8c9a92;
+  background: #f1f4f1;
+}
+
+/* ---------- 空态 ---------- */
+.empty-state {
+  display: grid;
+  justify-items: center;
+  padding: 40px 18px 30px;
+  border-top: 0;
+  text-align: center;
+}
+
+.empty-state h2 {
+  margin-top: 14px;
+  font-size: 14px;
+}
+
+.empty-state p {
+  max-width: 300px;
+  margin-top: 7px;
+  color: #7e8987;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.empty-platforms {
+  max-width: 100%;
+  margin-top: 16px;
+  padding: 12px;
+  border-color: #e6ece6;
+  border-radius: 12px;
+}
+
+.empty-platforms li {
+  grid-template-columns: 7px 64px auto minmax(0, 1fr);
+  gap: 6px;
+  font-size: 10px;
+}
+
+/* ---------- 工具页 ---------- */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.section-head b {
+  color: #3e4c45;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+}
+
+.section-head span {
+  color: #a6b2aa;
+  font-size: 9.5px;
+  letter-spacing: 0.2px;
+}
+
+.sync-card,
+.platform-status,
+.quick-jump,
+.display-options,
+.course-registry,
+.log-panel,
+.diagnostic {
+  margin-top: 12px;
+  padding: 12px 13px;
+  border: 1px solid #e6ece6;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.sync-card {
+  background: linear-gradient(150deg, #f6f9f5, #ffffff);
+}
+
+.sync-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #7b8a82;
+  font-size: 10px;
+}
+
+.sync-top b {
+  color: #4b5a52;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.sync-meta {
+  margin-top: 6px;
+  color: #98a69e;
+  font-size: 9.5px;
+  letter-spacing: 0.1px;
+}
+
+.sync-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 11px;
+}
+
+.btn-primary,
+.btn-ghost {
+  display: grid;
+  flex: 1;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+}
+
+.btn-primary {
+  border: 0;
+  color: #f2f7f3;
+  background: #2f6b5d;
+  box-shadow: 0 8px 16px -10px rgba(47, 107, 93, 0.9);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #28594d;
+}
+
+.btn-ghost {
+  border: 1px solid #e0e8e1;
+  color: #5b6a62;
+  background: #ffffff;
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: #f3f8f4;
+}
+
+.btn-primary:disabled,
+.btn-ghost:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.platform-status {
+  display: block;
+}
+
+.platform-status-item {
+  display: grid;
+  grid-template-columns: 7px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border: 0;
+  border-bottom: 1px solid #f1f4f1;
+  border-radius: 0;
+  background: transparent;
+  font-size: 10px;
+}
+
+.platform-status-item:last-child {
+  border-bottom: 0;
+}
+
+.platform-name {
+  overflow: hidden;
+  color: #3e4c45;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-status-item .status-label {
+  margin-left: 0;
+  color: #8c9a92;
+  font-size: 9.5px;
+}
+
+/* 旧版状态行用 nth-child 把状态压到第二行，这里显式恢复单行四列 */
+.platform-status-item > span:nth-child(2) {
+  grid-column: 2;
+  grid-row: auto;
+}
+
+.platform-status-item > .status-label {
+  grid-column: 3;
+  grid-row: auto;
+}
+
+.platform-status-item > .platform-time {
+  grid-column: 4;
+  grid-row: auto;
+}
+
+.platform-time {
+  color: #c3cec6;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.quick-jump {
+  padding: 12px 13px;
+}
+
+.quick-jump-head {
+  margin: 0;
+  color: #3e4c45;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+
+.quick-jump-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.jump-button {
+  flex: 1 1 0;
+  padding: 8px 6px;
+  border: 1px solid #e5ece6;
+  border-radius: 8px;
+  color: #3f6b60;
+  background: #f8fbf8;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.jump-button:hover {
+  border-color: #bcd2c3;
+  background: #eef6f1;
+}
+
+/* 显示选项：整行开关 */
+.display-options {
+  display: block;
+  padding: 2px 13px 8px;
+}
+
+.display-options .section-head {
+  padding-top: 10px;
+}
+
+.toggle-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  border: 0;
+  border-bottom: 1px solid #f1f4f1;
+  border-radius: 0;
+  background: transparent;
+  color: #4b5a52;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.toggle-row:last-of-type {
+  border-bottom: 0;
+}
+
+.toggle-text {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  letter-spacing: 0.1px;
+}
+
+.toggle-text > span {
+  display: block;
+  margin-top: 2px;
+  color: #a6b2aa;
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+.toggle-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: #dce4de;
+  transition: background 0.15s ease;
+}
+
+.toggle.on .toggle-switch,
+.toggle-row.on .toggle-switch {
+  background: #2f6b5d;
+}
+
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(23, 37, 31, 0.25);
+  transition: transform 0.15s ease;
+}
+
+.toggle.on .toggle-knob,
+.toggle-row.on .toggle-knob {
+  transform: translateX(12px);
+}
+
+.hidden-hint {
+  display: block;
+  padding: 6px 2px 0;
+  color: #b07d2b;
+  font-size: 9px;
+}
+
+/* 课程注册表 / 诊断 / 日志：沿用功能样式，统一为同一种卡片语言 */
+.course-registry {
+  padding: 0;
+  overflow: hidden;
+}
+
+.registry-toggle {
+  padding: 11px 13px;
+  border-radius: 0;
+}
+
+.registry-actions {
+  padding: 0 13px 11px;
+}
+
+.crawl-button {
+  border-color: #cfe0d9;
+  background: #f2f8f5;
+  font-size: 9.5px;
+}
+
+.registry-list {
+  padding: 0 13px 13px;
+}
+
+.registry-item {
+  border-color: #eef2ee;
+  border-radius: 9px;
+  background: #fbfcfa;
+}
+
+.registry-name {
+  font-size: 10.5px;
+}
+
+.registry-alias,
+.registry-teacher,
+.registry-ids,
+.registry-progress {
+  font-size: 8.5px;
+}
+
+.diagnostic {
+  padding: 13px;
+  border-style: solid;
+  border-color: #e6ece6;
+  background: #ffffff;
+}
+
+.diagnostic-head {
+  color: #3e4c45;
+  font-size: 10.5px;
+}
+
+.diagnostic-toggle {
+  color: #3e4c45;
+  font-size: 10.5px;
+}
+
+.diagnostic-badge {
+  color: #2f6b5d;
+  background: #e7f2eb;
+  font-size: 8.5px;
+}
+
+.diagnostic-findings {
+  padding: 11px;
+  border-color: #dfe9e1;
+  border-radius: 10px;
+  background: #f6f9f5;
+}
+
+.diagnostic-note {
+  font-size: 9px;
+}
+
+.diagnostic-output,
+.diagnostic-maintext {
+  border-color: #e3eae4;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.log-panel {
+  padding: 13px;
+}
+
+.log-head {
+  color: #3e4c45;
+  font-size: 10.5px;
+}
+
+.log-list {
+  max-height: 200px;
+}
+
+.log-item {
+  border-radius: 7px;
+  background: #f7f9f7;
+  font-size: 10px;
+}
+
+.text-button {
+  padding: 6px 10px;
+  border-color: #dbe5dd;
+  border-radius: 8px;
+  color: #3f6b60;
+  background: #ffffff;
+  font-size: 10px;
+}
+
+.text-button:hover:not(:disabled) {
+  border-color: #b9d0c1;
+  background: #f3f8f4;
+}
+
+/* ---------- 底部状态条 ---------- */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 9px 2px 2px;
+  border-top: 1px solid #f0f3f0;
+  color: #93a198;
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.footer-live {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.footer-live i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #57a78a;
+  box-shadow: 0 0 6px #57a78a;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+/* 底部按钮是唯一高频操作，字号单独提到 11px，避免小字号中文发虚 */
+.footer .text-button {
+  min-height: 28px;
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.footer-build {
+  color: #b3beb6;
+  font-family: "Segoe UI", sans-serif;
+  font-size: 9px;
+  letter-spacing: 0;
+}
+
+/* 窄屏兜底：380px 已是目标宽度，这里只处理极端窄视口的横向溢出 */
+@media (max-width: 360px) {
+  .app-shell {
+    padding: 12px;
+  }
+
+  .summary-platforms {
+    display: none;
+  }
 }

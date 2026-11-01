@@ -117,27 +117,115 @@ function sortAssignments(assignments: Assignment[]): Assignment[] {
   return [...assignments].sort(compareAssignments);
 }
 
-// 跨课程分组：按“平台 + 课程”聚合，保持平台顺序，组内按截止时间/标题排序。
+// 筛选按钮/卡片上的短平台名：完整名在 380px 弹窗里会挤占计数徽标。
+const PLATFORM_SHORT_LABELS: Record<PlatformId, string> = {
+  neusoft: '东软',
+  pigai: '批改网',
+  itest: 'iTEST',
+  chaoxing: '学习通',
+};
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+// 截止徽章：只区分「今天 / 明天 / 之后 / 已过期」，颜色只表达紧急度。
+type DueTone = 'today' | 'soon' | 'later' | 'overdue' | 'none';
+
+function dueMeta(assignment: Assignment): { label: string; tone: DueTone; title: string } {
+  if (!assignment.dueAt) {
+    return { label: '无截止', tone: 'none', title: '平台未提供截止时间' };
+  }
+
+  const date = new Date(assignment.dueAt);
+  if (Number.isNaN(date.getTime())) {
+    return { label: assignment.dueAt, tone: 'later', title: assignment.dueAt };
+  }
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dueDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayDiff = Math.round((dueDay.getTime() - today.getTime()) / 86400000);
+  const clock = `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+  const full = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+
+  if (assignment.status === 'expired' || dayDiff < 0) {
+    return { label: '已过期', tone: 'overdue', title: `截止 ${full}` };
+  }
+  if (dayDiff === 0) {
+    return { label: `今天 ${clock}`, tone: 'today', title: `今天 ${clock} 截止` };
+  }
+  if (dayDiff === 1) {
+    return { label: `明天 ${clock}`, tone: 'soon', title: `明天 ${clock} 截止` };
+  }
+  return {
+    label: `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${clock}`,
+    tone: 'later',
+    title: `${full} 截止`,
+  };
+}
+
+function isDueToday(assignment: Assignment): boolean {
+  return dueMeta(assignment).tone === 'today';
+}
+
+// 平台卡片头右侧的「HH:mm 已同步」，避免在 380px 宽度里塞完整日期。
+function formatSyncClock(value: string | null): string {
+  if (!value) {
+    return '未同步';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '未同步';
+  }
+  return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function formatUpdatedClock(value: string | null): string {
+  if (!value) {
+    return '尚未同步';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '时间未知';
+  }
+  return `${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+function formatClockOnly(value: string | null): string {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+}
+
+// 跨课程分组：按平台聚合（设计稿 04 的口径），组内按截止时间/标题排序；
+// 课程名下沉到卡片副标题，避免同一平台被拆成多个重复的分组标题。
 interface AssignmentGroup {
   key: string;
-  label: string;
   platformId: PlatformId;
   assignments: Assignment[];
 }
 
 function groupAssignments(items: Assignment[]): AssignmentGroup[] {
-  const map = new Map<string, AssignmentGroup>();
+  const map = new Map<PlatformId, AssignmentGroup>();
   for (const assignment of items) {
-    const key = `${assignment.platformId}:${assignment.courseId}`;
-    let group = map.get(key);
+    let group = map.get(assignment.platformId);
     if (!group) {
       group = {
-        key,
-        label: assignment.courseName || assignment.courseId || '未知课程',
+        key: assignment.platformId,
         platformId: assignment.platformId,
         assignments: [],
       };
-      map.set(key, group);
+      map.set(assignment.platformId, group);
     }
     group.assignments.push(assignment);
   }
@@ -261,6 +349,25 @@ function App() {
   }, [store, hideExpired]);
 
   const courseCount = store ? countCoveredCourses(store) : 0;
+
+  // 顶部汇总卡使用「全局口径」：不随平台筛选变化，避免切换筛选时数字跳动。
+  const globalVisibleAssignments = useMemo(() => {
+    if (!store) {
+      return [];
+    }
+    return sortAssignments(
+      getAllAssignments(store).filter((a) => isAssignmentVisible(a, { hideExpired })),
+    );
+  }, [store, hideExpired]);
+  const globalVisibleCount = globalVisibleAssignments.length;
+  const globalHiddenCount = totalCount - globalVisibleCount;
+  const dueTodayCount = useMemo(
+    () => globalVisibleAssignments.filter(isDueToday).length,
+    [globalVisibleAssignments],
+  );
+  const syncedPlatformCount = store
+    ? PLATFORM_IDS.filter((id) => store.platforms[id].status === 'success').length
+    : 0;
 
   // 逐课同步的展示口径：运行中显示“已完成 x/y 门”，结束后显示后台给的结论。
   const isCrawling = crawlPending || crawlState?.running === true;
@@ -661,65 +768,88 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={view === 'dashboard' ? 'app-shell is-dashboard' : 'app-shell'}>
       <header className="topbar">
-        <div>
-          <p className="eyebrow">PERSONAL WORKSPACE</p>
-          <h1>作业整合看板</h1>
-          <p className="subtitle">只显示平台明确标记为未提交的作业</p>
+        <div className="topbar-main">
+          <h1>{view === 'dashboard' ? '作业看板' : '工具与同步'}</h1>
+          <p className="subtitle">
+            {view === 'dashboard'
+              ? `${syncedPlatformCount} 个平台已同步 · ${formatUpdatedClock(store.updatedAt)}`
+              : '数据只保存在本机，不上传'}
+          </p>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          onClick={() => void requestCurrentPageSync()}
-          title="刷新当前平台"
-          aria-label="刷新当前平台"
-        >
-          {isRefreshing ? '...' : '↻'}
-        </button>
+        <div className="topbar-actions">
+          {view === 'tools' && (
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setView('dashboard')}
+              title="返回作业看板"
+              aria-label="返回作业看板"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M14 6l-6 6 6 6" />
+              </svg>
+            </button>
+          )}
+          <button
+            className={isRefreshing ? 'icon-button spinning' : 'icon-button'}
+            type="button"
+            onClick={() => void requestCurrentPageSync()}
+            title="刷新当前平台"
+            aria-label="刷新当前平台"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.3-5.6" />
+              <path d="M20 4v5h-5" />
+            </svg>
+          </button>
+          {view === 'dashboard' && (
+            <button
+              className="icon-button"
+              type="button"
+              onClick={() => setView('tools')}
+              title="工具与设置"
+              aria-label="工具与设置"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                <path d="M4 7h10M18 7h2M4 17h2M10 17h10" />
+                <circle cx="15" cy="7" r="2" />
+                <circle cx="7" cy="17" r="2" />
+              </svg>
+            </button>
+          )}
+        </div>
       </header>
-
-      <nav className="tab-bar" role="tablist" aria-label="视图切换">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'dashboard'}
-          className={view === 'dashboard' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setView('dashboard')}
-        >
-          作业看板
-          <span className="tab-count">{visibleCount}</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === 'tools'}
-          className={view === 'tools' ? 'tab-btn active' : 'tab-btn'}
-          onClick={() => setView('tools')}
-        >
-          工具
-        </button>
-      </nav>
 
       {view === 'dashboard' && (
         <>
-      <section className="summary-strip" aria-label="作业摘要">
-        <div>
-          <span className="summary-label">未完成</span>
-          <strong>{visibleCount}</strong>
-          <span className="summary-suffix">项</span>
-        </div>
-        <div className="summary-meta">
-          {hiddenCount > 0 && (
+      <section className="summary-card" aria-label="作业摘要">
+        <div className="summary-main">
+          <span className="summary-cap">待完成</span>
+          <div className="summary-num">
+            {globalVisibleCount}
+            <span>项</span>
+          </div>
+          <div className="summary-sub">
+            {dueTodayCount > 0 ? `${dueTodayCount} 项今天截止` : '今天没有截止项'} · 覆盖 {courseCount} 门课程
+          </div>
+          {globalHiddenCount > 0 && (
             // 关键提示：作业抓到了、只是按当前口径不显示。
             // 少了这一行，用户看到「未完成 0 项」会以为同步失败（2026-10-29 的真实反馈）。
             <span className="summary-hidden" title="这些项已同步到本机，但按当前显示口径不列出">
-              另有 {hiddenCount} 项已完成或已过期
+              另有 {globalHiddenCount} 项已完成或已过期
             </span>
           )}
-          <span>覆盖 {courseCount} 门课程</span>
-          <span>按访问平台更新</span>
-          <span>缓存保存在本机</span>
+        </div>
+        <div className="summary-platforms">
+          {PLATFORM_IDS.map((platformId) => (
+            <div className="summary-platform" key={platformId}>
+              <i className={`plat-dot plat-${platformId}`} />
+              <span>{PLATFORM_SHORT_LABELS[platformId]}</span>
+              <b>{visibleByPlatform[platformId]}</b>
+            </div>
+          ))}
         </div>
       </section>
         </>
@@ -727,6 +857,82 @@ function App() {
 
       {view === 'tools' && (
         <>
+      <section className="sync-card" aria-label="同步概览">
+        <div className="sync-top">
+          <span>本机缓存</span>
+          <b>
+            {globalVisibleCount} 项 · {courseCount} 门课程
+          </b>
+        </div>
+        <p className="sync-meta">{formatUpdatedAt(store.updatedAt)} · 按访问平台更新</p>
+        <div className="sync-actions">
+          <button
+            className="btn-primary"
+            type="button"
+            onClick={() => void requestCurrentPageSync()}
+            disabled={isRefreshing || isCrawling}
+          >
+            {isRefreshing ? '同步中…' : '同步当前页面'}
+          </button>
+          {chaoxingCourses.length > 0 && (
+            <button
+              className="btn-ghost"
+              type="button"
+              onClick={() => void crawlChaoxing()}
+              disabled={isCrawling}
+            >
+              {isCrawling ? '逐课同步中…' : `逐课同步 ${chaoxingCourses.length} 门`}
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section className="platform-status" aria-label="平台同步状态">
+        <div className="section-head">
+          <b>平台状态</b>
+          <span>按访问更新</span>
+        </div>
+        {PLATFORM_IDS.map((platformId) => {
+          const platform = store.platforms[platformId];
+          return (
+            <div
+              className="platform-status-item"
+              key={platformId}
+              title={platform.message ?? undefined}
+            >
+              <i className={`plat-dot plat-${platformId}`} />
+              <span className="platform-name">{PLATFORM_LABELS[platformId]}</span>
+              <span className="status-label">{statusLabel(platform.status)}</span>
+              <span className="platform-time">
+                {formatSyncClock(platform.lastSyncedAt)}
+              </span>
+            </div>
+          );
+        })}
+      </section>
+
+      <section className="quick-jump" aria-label="快捷跳转">
+        <div className="section-head">
+          <b>快捷跳转</b>
+          <span>无任务也能直达站点</span>
+        </div>
+        <div className="quick-jump-row">
+          {PLATFORM_IDS.map((platformId) => (
+            <button
+              key={platformId}
+              type="button"
+              className="jump-button"
+              title={`打开${PLATFORM_LABELS[platformId]}官网`}
+              onClick={() =>
+                void browser.tabs.create({ url: PLATFORM_HOME[platformId], active: true })
+              }
+            >
+              {PLATFORM_SHORT_LABELS[platformId]}
+            </button>
+          ))}
+        </div>
+      </section>
+
       {chaoxingCourses.length > 0 && (
         <section className="course-registry" aria-label="学习通课程注册表">
           <button
@@ -839,7 +1045,7 @@ function App() {
           onClick={() => setFilter('all')}
         >
           全部
-          <span>{visibleCount}</span>
+          <span>{globalVisibleCount}</span>
         </button>
         {PLATFORM_IDS.map((platformId) => (
           <button
@@ -848,7 +1054,7 @@ function App() {
             onClick={() => setFilter(platformId)}
             key={platformId}
           >
-            {PLATFORM_LABELS[platformId]}
+            {PLATFORM_SHORT_LABELS[platformId]}
             <span>{visibleByPlatform[platformId]}</span>
           </button>
         ))}
@@ -859,11 +1065,15 @@ function App() {
       {view === 'tools' && (
         <>
       <section className="display-options" aria-label="显示选项">
+        <div className="section-head">
+          <b>显示选项</b>
+          <span>偏好设置</span>
+        </div>
         <button
           type="button"
           role="switch"
           aria-checked={hideExpired}
-          className={`toggle ${hideExpired ? 'on' : ''}`}
+          className={`toggle-row ${hideExpired ? 'on' : ''}`}
           onClick={async () => {
             const next = !hideExpired;
             setHideExpired(next);
@@ -876,7 +1086,10 @@ function App() {
           }}
           title="开启后，截止时间已过的作业将从看板隐藏（仍保留在缓存中，关闭即恢复显示）"
         >
-          <span className="toggle-text">自动隐藏已过期项</span>
+          <span className="toggle-text">
+            自动隐藏已过期项
+            <span>过期后仍保留在本机缓存</span>
+          </span>
           <span className="toggle-switch" aria-hidden="true">
             <span className="toggle-knob" />
           </span>
@@ -885,7 +1098,7 @@ function App() {
           type="button"
           role="switch"
           aria-checked={startupNotify}
-          className={`toggle ${startupNotify ? 'on' : ''}`}
+          className={`toggle-row ${startupNotify ? 'on' : ''}`}
           onClick={async () => {
             const next = !startupNotify;
             setStartupNotify(next);
@@ -898,7 +1111,10 @@ function App() {
           }}
           title="关闭后，重新打开浏览器不再在右下角强制弹出作业提醒；但作业数量变化时仍会正常通知。"
         >
-          <span className="toggle-text">重开浏览器时弹出作业提醒</span>
+          <span className="toggle-text">
+            重开浏览器时弹出提醒
+            <span>开启后重新打开浏览器会汇总播报</span>
+          </span>
           <span className="toggle-switch" aria-hidden="true">
             <span className="toggle-knob" />
           </span>
@@ -907,7 +1123,7 @@ function App() {
           type="button"
           role="switch"
           aria-checked={showPageBadge}
-          className={`toggle ${showPageBadge ? 'on' : ''}`}
+          className={`toggle-row ${showPageBadge ? 'on' : ''}`}
           onClick={async () => {
             const next = !showPageBadge;
             setShowPageBadge(next);
@@ -920,7 +1136,10 @@ function App() {
           }}
           title="关闭后，访问作业站点时不再在页面右下角显示浮层；扩展图标角标与弹窗不受影响。"
         >
-          <span className="toggle-text">在页面内显示浮层</span>
+          <span className="toggle-text">
+            在页面内显示浮层
+            <span>访问平台时右下角显示待办角标</span>
+          </span>
           <span className="toggle-switch" aria-hidden="true">
             <span className="toggle-knob" />
           </span>
@@ -928,46 +1147,6 @@ function App() {
         {hideExpired && hiddenCount > 0 && (
           <span className="hidden-hint">已隐藏 {hiddenCount} 项过期作业</span>
         )}
-      </section>
-        </>
-      )}
-
-      {view === 'dashboard' && (
-        <>
-      <section className="platform-status" aria-label="平台同步状态">
-        {PLATFORM_IDS.map((platformId) => {
-          const platform = store.platforms[platformId];
-          return (
-            <div
-              className="platform-status-item"
-              key={platformId}
-              title={platform.message ?? undefined}
-            >
-              <span className={`status-dot status-${platform.status}`} />
-              <span>{PLATFORM_LABELS[platformId]}</span>
-              <span className="status-label">{statusLabel(platform.status)}</span>
-            </div>
-          );
-        })}
-      </section>
-
-      <section className="quick-jump" aria-label="快捷跳转">
-        <div className="quick-jump-head">快捷跳转（无任务也能直达站点）</div>
-        <div className="quick-jump-row">
-          {PLATFORM_IDS.map((platformId) => (
-            <button
-              key={platformId}
-              type="button"
-              className="jump-button"
-              title={`打开${PLATFORM_LABELS[platformId]}官网`}
-              onClick={() =>
-                void browser.tabs.create({ url: PLATFORM_HOME[platformId], active: true })
-              }
-            >
-              {PLATFORM_LABELS[platformId]}
-            </button>
-          ))}
-        </div>
       </section>
         </>
       )}
@@ -1212,35 +1391,61 @@ function App() {
         <>
       <section className="assignment-list" aria-live="polite">
         {groups.length > 0 ? (
-          groups.map((group) => (
-            <div className="assignment-group" key={group.key}>
-              <div className="assignment-group-head">
-                <span className="group-label">{group.label}</span>
-                <span className="group-meta">
-                  {PLATFORM_LABELS[group.platformId]} · {group.assignments.length} 项
-                </span>
-              </div>
-              {group.assignments.map((assignment) => (
-                <a
-                  className={`assignment-row is-${assignment.status}`}
-                  href={assignment.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  key={assignment.id}
-                >
-                  <span className="assignment-mark" />
-                  <span className="assignment-content">
-                    <strong>{assignment.title}</strong>
-                    <span>
-                      {PLATFORM_LABELS[assignment.platformId]} ·{' '}
-                      {assignmentStatusLabel(assignment.status)}
-                    </span>
+          groups.map((group) => {
+            const platform = store.platforms[group.platformId];
+            return (
+              <div className="assignment-group" key={group.key}>
+                <div className="assignment-group-head">
+                  <span className="group-head-left">
+                    <i className={`plat-dot plat-${group.platformId}`} />
+                    <span className="group-label">{PLATFORM_LABELS[group.platformId]}</span>
+                    <span className="group-count">{group.assignments.length} 项</span>
                   </span>
-                  <span className="assignment-due">{formatDate(assignment.dueAt)}</span>
-                </a>
-              ))}
-            </div>
-          ))
+                  <span className="group-meta">
+                    {platform.lastSyncedAt ? `${formatClockOnly(platform.lastSyncedAt)} 已同步` : '未同步'}
+                  </span>
+                </div>
+                {group.assignments.map((assignment) => {
+                  const due = dueMeta(assignment);
+                  return (
+                    <a
+                      className={`task-card plat-${assignment.platformId}`}
+                      href={assignment.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      key={assignment.id}
+                      title={`${assignment.title} · ${due.title}`}
+                    >
+                      <span className="task-ic">
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.9"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M6 3.5h9l4 4V20a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20V5a1.5 1.5 0 0 1 1-1.5z" />
+                          <path d="M14.5 3.5V8H19M8.5 12h7M8.5 16h4.5" />
+                        </svg>
+                      </span>
+                      <span className="task-body">
+                        <strong>{assignment.title}</strong>
+                        <span>
+                          {assignment.courseName || PLATFORM_LABELS[assignment.platformId]} ·{' '}
+                          {assignmentStatusLabel(assignment.status)}
+                        </span>
+                      </span>
+                      <span className={`due-badge due-${due.tone}`}>{due.label}</span>
+                    </a>
+                  );
+                })}
+              </div>
+            );
+          })
         ) : (
           <div className="empty-state">
             <div className="empty-icon">✓</div>
@@ -1275,21 +1480,6 @@ function App() {
         </>
       )}
 
-      <footer className="footer">
-        <span>{formatUpdatedAt(store.updatedAt)}</span>
-        <span className="footer-actions">
-          <span title={`构建标识：${BUILD_ID}`}>构建 {formatBuildId(BUILD_ID)}</span>
-          <button
-            className="text-button"
-            type="button"
-            onClick={reloadExtension}
-            title="重新加载扩展，让新构建的解析器立即生效（重载后请重新打开本弹窗）"
-          >
-            重载扩展
-          </button>
-        </span>
-      </footer>
-
       {view === 'tools' && (
         <>
       <section className="log-panel" aria-label="运行日志">
@@ -1315,6 +1505,26 @@ function App() {
       </section>
         </>
       )}
+
+      <footer className="footer">
+        <span className="footer-live">
+          <i aria-hidden="true" />
+          {formatUpdatedAt(store.updatedAt)}
+        </span>
+        <span className="footer-actions">
+          <button
+            className="text-button"
+            type="button"
+            onClick={reloadExtension}
+            title="重新加载扩展，让新构建的解析器立即生效（重载后请重新打开本弹窗）"
+          >
+            重载扩展
+          </button>
+          <span className="footer-build" title={`构建标识：${BUILD_ID}`}>
+            v{formatBuildId(BUILD_ID)}
+          </span>
+        </span>
+      </footer>
     </main>
   );
 }

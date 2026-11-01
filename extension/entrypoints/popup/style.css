@@ -1,8 +1,7 @@
 :root {
-  font-family:
-    Inter, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  color: #182326;
-  background: #f7f8f5;
+  font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  color: #17251f;
+  background: #f6f8f4;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -16,11 +15,26 @@ body {
   /* 弹窗宽度由宿主（Chrome/Edge）按内容宽度决定，上限 800px。
      这里显式给 body 定宽：一旦改用媒体查询里的 width:auto，
      浏览器可能先按初始窄视口排版，popup 就被永久压成一条窄栏
-     （表现为内容堆叠换行、运行日志每行只剩几个字）。 */
-  width: 680px;
-  min-height: 400px;
+     （表现为内容堆叠换行、运行日志每行只剩几个字）。
+     380px 对齐设计稿 04 的弹窗宽度。 */
+  width: 380px;
+  min-height: 480px;
   margin: 0;
   overflow-x: hidden;
+  background: #ffffff;
+}
+
+/* 隐藏页面级滑轨（工具页内容超过 600px 时会出现），滚动功能保留。 */
+html,
+body {
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 button,
