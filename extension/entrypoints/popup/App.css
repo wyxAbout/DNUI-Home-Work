@@ -1376,7 +1376,7 @@ h1 {
   padding: 0;
   place-items: center;
   border: 1px solid #e3eae4;
-  border-radius: 9px;
+  border-radius: 11px;
   color: #4b5a52;
   background: #fcfdfb;
   font-size: 14px;
@@ -1409,10 +1409,11 @@ h1 {
   justify-content: space-between;
   gap: 10px;
   margin-top: 14px;
-  padding: 13px 14px;
+  padding: 14px 15px;
   border: 1px solid #d8e8dd;
-  border-radius: 14px;
+  border-radius: 18px;
   background: linear-gradient(140deg, #e9f3ec 0%, #f8fcf8 62%, #f2f8f2 100%);
+  box-shadow: 0 16px 30px -26px rgba(47, 107, 93, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.75);
 }
 
 .summary-main {
@@ -1536,9 +1537,9 @@ h1 {
   flex: 0 0 auto;
   align-items: center;
   gap: 5px;
-  padding: 6px 10px;
+  padding: 6px 11px;
   border: 1px solid #e5ece6;
-  border-radius: 8px;
+  border-radius: 11px;
   color: #65736b;
   background: #fcfdfb;
   font: inherit;
@@ -1588,7 +1589,7 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 2px 6px;
+  padding: 0 2px 8px;
   border-bottom: 0;
 }
 
@@ -1628,15 +1629,16 @@ h1 {
   display: flex;
   align-items: center;
   gap: 9px;
-  margin-bottom: 6px;
-  padding: 10px 11px;
+  margin-bottom: 7px;
+  padding: 11px 12px;
   border: 1px solid #edf1ed;
-  border-radius: 11px;
-  background: #fcfdfb;
-  box-shadow: 0 6px 12px -10px rgba(23, 37, 31, 0.35);
+  border-radius: 15px;
+  background: linear-gradient(180deg, #ffffff 0%, #fcfdfb 100%);
+  box-shadow: 0 10px 20px -18px rgba(23, 37, 31, 0.5);
   color: inherit;
   text-decoration: none;
-  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
 .task-card:last-child {
@@ -1674,6 +1676,7 @@ h1 {
   border-color: #c9d9cd;
   background: #ffffff;
   transform: translateY(-1px);
+  box-shadow: 0 14px 26px -18px rgba(23, 37, 31, 0.45);
 }
 
 .task-ic {
@@ -1682,7 +1685,7 @@ h1 {
   height: 26px;
   flex: none;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 10px;
   background: #eef4ef;
   color: #5c6b63;
 }
@@ -1735,8 +1738,8 @@ h1 {
 
 .due-badge {
   flex: none;
-  padding: 4px 7px;
-  border-radius: 6px;
+  padding: 4px 8px;
+  border-radius: 8px;
   font-family: "Segoe UI", sans-serif;
   font-size: 9.5px;
   font-weight: 600;
@@ -1794,9 +1797,9 @@ h1 {
 .empty-platforms {
   max-width: 100%;
   margin-top: 16px;
-  padding: 12px;
+  padding: 13px;
   border-color: #e6ece6;
-  border-radius: 12px;
+  border-radius: 16px;
 }
 
 .empty-platforms li {
@@ -1834,10 +1837,11 @@ h1 {
 .log-panel,
 .diagnostic {
   margin-top: 12px;
-  padding: 12px 13px;
+  padding: 13px 14px;
   border: 1px solid #e6ece6;
-  border-radius: 12px;
+  border-radius: 16px;
   background: #ffffff;
+  box-shadow: 0 12px 24px -24px rgba(23, 37, 31, 0.35);
 }
 
 .sync-card {
@@ -1879,7 +1883,7 @@ h1 {
   flex: 1;
   height: 30px;
   place-items: center;
-  border-radius: 8px;
+  border-radius: 10px;
   font: inherit;
   font-size: 10px;
   letter-spacing: 0.6px;
@@ -1994,7 +1998,7 @@ h1 {
   flex: 1 1 0;
   padding: 8px 6px;
   border: 1px solid #e5ece6;
-  border-radius: 8px;
+  border-radius: 11px;
   color: #3f6b60;
   background: #f8fbf8;
   font: inherit;
@@ -2120,7 +2124,7 @@ h1 {
 
 .registry-item {
   border-color: #eef2ee;
-  border-radius: 9px;
+  border-radius: 12px;
   background: #fbfcfa;
 }
 
@@ -2161,7 +2165,7 @@ h1 {
 .diagnostic-findings {
   padding: 11px;
   border-color: #dfe9e1;
-  border-radius: 10px;
+  border-radius: 14px;
   background: #f6f9f5;
 }
 
@@ -2190,7 +2194,7 @@ h1 {
 }
 
 .log-item {
-  border-radius: 7px;
+  border-radius: 10px;
   background: #f7f9f7;
   font-size: 10px;
 }
@@ -2198,7 +2202,7 @@ h1 {
 .text-button {
   padding: 6px 10px;
   border-color: #dbe5dd;
-  border-radius: 8px;
+  border-radius: 10px;
   color: #3f6b60;
   background: #ffffff;
   font-size: 10px;
@@ -2250,6 +2254,7 @@ h1 {
 .footer .text-button {
   min-height: 28px;
   padding: 6px 12px;
+  border-radius: 11px;
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0;
